@@ -1,0 +1,10 @@
+<config>
+  <docs>
+    <root_dir>.docs</root_dir>
+    <context_file>.docs/CONTEXT.md</context_file>
+    <adr_dir>.docs/adr</adr_dir>
+    <prd_dir>.docs/prd</prd_dir>
+    <issues_dir>.docs/issues</issues_dir>
+    <handoff_file>.docs/HANDOFF.md</handoff_file>
+  </docs>
+</config>

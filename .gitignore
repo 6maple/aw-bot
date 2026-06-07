@@ -1,0 +1,9 @@
+.tmp
+.cache
+
+.venv
+.data
+.env.local
+.env.*.local
+
+__pycache__/
