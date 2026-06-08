@@ -10,7 +10,13 @@ class CodexStdioClientTest(unittest.TestCase):
     def test_uses_single_bidirectional_stdio_connection(self) -> None:
         async def run() -> None:
             process = FakeProcess()
-            with patch("c_auto_bridge.agent.codex_stdio.asyncio.create_subprocess_exec", return_value=process):
+            calls = []
+
+            async def process_factory(*args, **kwargs):
+                calls.append((args, kwargs))
+                return process
+
+            with patch("c_auto_bridge.agent.codex_stdio.asyncio.create_subprocess_exec", process_factory):
                 client = CodexStdioClient(executable="codex", codex_home="home")
                 await client.connect()
                 initialize = asyncio.create_task(client.initialize())
@@ -26,6 +32,29 @@ class CodexStdioClientTest(unittest.TestCase):
             self.assertEqual(sent[0]["method"], "initialize")
             self.assertEqual(sent[1]["method"], "initialized")
             self.assertEqual(sent[2], {"id": 9, "result": {"decision": "accept"}})
+            self.assertEqual(calls[0][0][:4], ("codex", "app-server", "--listen", "stdio://"))
+            self.assertEqual(calls[0][1]["env"]["CODEX_HOME"], "home")
+
+        asyncio.run(run())
+
+    def test_omits_codex_home_from_process_environment_when_unset(self) -> None:
+        async def run() -> None:
+            process = FakeProcess()
+            captured_env = {}
+
+            async def process_factory(*args, **kwargs):
+                captured_env.update(kwargs["env"])
+                return process
+
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch("c_auto_bridge.agent.codex_stdio.asyncio.create_subprocess_exec", process_factory),
+            ):
+                client = CodexStdioClient(executable="codex", codex_home=None)
+                await client.connect()
+                await client.close()
+
+            self.assertNotIn("CODEX_HOME", captured_env)
 
         asyncio.run(run())
 

@@ -20,7 +20,7 @@ The local directory used by Agent Turns.
 
 ## Queued Message
 
-A Chat message held until the active Run finishes.
+A Chat message, including any supported Attachments, held until the active Run finishes.
 
 ## Message Merge Window
 
@@ -28,7 +28,12 @@ The short interval where consecutive Queued Messages are combined into one Agent
 
 ## Attachment
 
-A Chat-provided local file input passed to an Agent Turn.
+A Chat-provided local input, such as an image or file, passed to an Agent Turn.
+
+## Agent
+
+An external coding system that maintains Agent Sessions and executes Agent Turns.
+_Avoid_: Provider, model, bot
 
 ## Idle Timeout
 

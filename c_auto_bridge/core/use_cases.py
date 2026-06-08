@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Callable
 
 from c_auto_bridge.core.agent_session import AccessMode, HistoricalAgentSession, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.idle_timeout import IdleTimeoutScheduler
 from c_auto_bridge.core.run import Run
 from c_auto_bridge.core.run_controller import RunController
@@ -11,6 +12,7 @@ from c_auto_bridge.core.workspace import NamedWorkspace, WorkspaceValidator
 from c_auto_bridge.ports.agent import AgentPort
 from c_auto_bridge.ports.persistence import RunPersistencePort
 from c_auto_bridge.ports.run_view_sink import RunViewSinkPort
+from c_auto_bridge.react.pending import map_approval_decision
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ class PrivateChatTextMessage:
     private_chat_scope_id: str
     user_id: str
     text: str
+    attachments: tuple[Attachment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,25 @@ class CoreUseCases:
                 user_id=message.user_id,
                 text=message.text,
             )
+        pending_approval_id = self._run_controller.open_approval_pending_request_id(
+            private_chat_scope_id=message.private_chat_scope_id,
+            user_id=message.user_id,
+        )
+        if pending_approval_id is not None:
+            decision = map_approval_decision(message.text)
+            if decision is None:
+                raise ValueError("approval decision is required: reply 同意/拒绝 or approve/reject")
+            logger.info(
+                "core routing text to pending approval: chat_id=%s decision=%s",
+                message.private_chat_scope_id,
+                decision,
+            )
+            return await self._run_controller.answer_approval(
+                private_chat_scope_id=message.private_chat_scope_id,
+                user_id=message.user_id,
+                pending_request_id=pending_approval_id,
+                decision=decision,
+            )
         if self._run_controller.has_active_run(
             private_chat_scope_id=message.private_chat_scope_id,
             user_id=message.user_id,
@@ -208,6 +230,7 @@ class CoreUseCases:
                 private_chat_scope_id=message.private_chat_scope_id,
                 user_id=message.user_id,
                 text=message.text,
+                attachments=message.attachments,
             )
         if command == "/resume":
             logger.info("core routing command: chat_id=%s command=/resume", message.private_chat_scope_id)
@@ -242,6 +265,7 @@ class CoreUseCases:
             private_chat_scope_id=message.private_chat_scope_id,
             user_id=message.user_id,
             text=message.text,
+            attachments=message.attachments,
         )
 
     async def handle_run_view_action(self, action: RunViewAction) -> Run:

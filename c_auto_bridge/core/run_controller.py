@@ -6,6 +6,7 @@ from typing import Callable
 
 from c_auto_bridge.core.agent_events import ApprovalRequested, RunInterrupted, RunTimedOut, UserInputRequested
 from c_auto_bridge.core.agent_session import AccessMode, AgentSession, HistoricalAgentSession, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.idle_timeout import AsyncioIdleTimeoutScheduler, IdleTimeoutHandle, IdleTimeoutScheduler
 from c_auto_bridge.core.pending_request import PendingRequest
 from c_auto_bridge.core.queue import QueuedMessage, pop_next_merged_prompt
@@ -52,7 +53,14 @@ class RunController:
         self._selected_sessions: dict[str, AgentSession] = {}
         self._idle_timeout_overrides: dict[str, float | None] = {}
 
-    async def start_text_run(self, *, private_chat_scope_id: str, user_id: str, text: str) -> Run:
+    async def start_text_run(
+        self,
+        *,
+        private_chat_scope_id: str,
+        user_id: str,
+        text: str,
+        attachments: tuple[Attachment, ...] = (),
+    ) -> Run:
         if private_chat_scope_id in self._active_runs:
             raise RuntimeError(f"scope already has an active run: {private_chat_scope_id}")
         logger.info(
@@ -78,6 +86,7 @@ class RunController:
             user_id=user_id,
             agent_session=agent_session,
             prompt=text,
+            attachments=attachments,
         )
         logger.info(
             "agent turn started: chat_id=%s session_id=%s turn_id=%s",
@@ -141,9 +150,8 @@ class RunController:
             run = await self.stop_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
         else:
             run = self._interrupted_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
-        await self._persistence.clear_current_session(private_chat_scope_id=private_chat_scope_id)
-        self._fresh_session_scope_ids.add(private_chat_scope_id)
-        self._selected_sessions.pop(private_chat_scope_id, None)
+        await self._clear_session_selection(private_chat_scope_id=private_chat_scope_id)
+        await self._create_selected_session(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
         return run
 
     async def change_workspace(
@@ -153,8 +161,13 @@ class RunController:
         user_id: str,
         workspace: Workspace,
     ) -> Run:
-        run = await self.reset_session(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
+        if self.has_any_active_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id):
+            run = await self.stop_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
+        else:
+            run = self._interrupted_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
+        await self._clear_session_selection(private_chat_scope_id=private_chat_scope_id)
         self._workspace = workspace
+        await self._create_selected_session(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
         return run
 
     @property
@@ -208,6 +221,7 @@ class RunController:
         private_chat_scope_id: str,
         user_id: str,
         text: str,
+        attachments: tuple[Attachment, ...] = (),
     ) -> Run:
         active_run = self._require_active_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
         if active_run.run_view.pending is not None:
@@ -216,6 +230,7 @@ class RunController:
             QueuedMessage(
                 user_id=user_id,
                 text=text,
+                attachments=attachments,
                 queued_at=self._clock(),
             )
         )
@@ -236,6 +251,17 @@ class RunController:
             and active_run.run_view.pending is not None
             and active_run.run_view.pending.kind == "user_input"
         )
+
+    def open_approval_pending_request_id(self, *, private_chat_scope_id: str, user_id: str) -> str | None:
+        active_run = self._active_runs.get(private_chat_scope_id)
+        if (
+            active_run is None
+            or active_run.user_id != user_id
+            or active_run.run_view.pending is None
+            or active_run.run_view.pending.kind != "approval"
+        ):
+            return None
+        return active_run.run_view.pending.pending_request_id
 
     async def answer_user_input(
         self,
@@ -400,7 +426,7 @@ class RunController:
                 private_chat_scope_id=private_chat_scope_id,
                 status=active_run.run_view.status,
             )
-        prompt, user_id, remaining = merged_prompt
+        prompt, attachments, user_id, remaining = merged_prompt
         active_run.queued_messages = remaining
         logger.info(
             "starting queued next turn: previous_run_id=%s chat_id=%s merged_text_len=%s remaining_count=%s",
@@ -414,6 +440,7 @@ class RunController:
             user_id=user_id,
             agent_session=active_run.agent_session,
             prompt=prompt,
+            attachments=attachments,
         )
         now = self._clock().isoformat()
         run = Run(
@@ -485,9 +512,14 @@ class RunController:
         user_id: str,
         agent_session: AgentSession,
         prompt: str,
+        attachments: tuple[Attachment, ...] = (),
     ) -> tuple[AgentSession, AgentTurnStreamPort]:
         try:
-            return agent_session, await self._agent.start_turn(agent_session=agent_session, prompt=prompt)
+            return agent_session, await self._start_agent_turn(
+                agent_session=agent_session,
+                prompt=prompt,
+                attachments=attachments,
+            )
         except AgentThreadNotFound:
             logger.info(
                 "agent session not found, creating replacement: chat_id=%s stale_session_id=%s",
@@ -508,7 +540,26 @@ class RunController:
                 private_chat_scope_id,
                 replacement.agent_session_id,
             )
-            return replacement, await self._agent.start_turn(agent_session=replacement, prompt=prompt)
+            return replacement, await self._start_agent_turn(
+                agent_session=replacement,
+                prompt=prompt,
+                attachments=attachments,
+            )
+
+    async def _start_agent_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        attachments: tuple[Attachment, ...],
+    ) -> AgentTurnStreamPort:
+        if attachments:
+            return await self._agent.start_turn(
+                agent_session=agent_session,
+                prompt=prompt,
+                attachments=attachments,
+            )
+        return await self._agent.start_turn(agent_session=agent_session, prompt=prompt)
 
     async def _record_agent_session(self, agent_session: AgentSession) -> None:
         await self._persistence.save_agent_session(
@@ -522,6 +573,30 @@ class RunController:
                 updated_at=self._clock().isoformat(),
             )
         )
+
+    async def _clear_session_selection(self, *, private_chat_scope_id: str) -> None:
+        await self._persistence.clear_current_session(private_chat_scope_id=private_chat_scope_id)
+        self._selected_sessions.pop(private_chat_scope_id, None)
+        self._fresh_session_scope_ids.discard(private_chat_scope_id)
+
+    async def _create_selected_session(self, *, private_chat_scope_id: str, user_id: str) -> AgentSession:
+        session = await self._agent.create_session(
+            private_chat_scope_id=private_chat_scope_id,
+            user_id=user_id,
+            agent_name=self._agent_name,
+            workspace=self._workspace,
+            access_mode=self._access_mode,
+        )
+        self._selected_sessions[private_chat_scope_id] = session
+        await self._record_agent_session(session)
+        logger.info(
+            "selected fresh agent session created: chat_id=%s session_id=%s agent=%s workspace=%s",
+            private_chat_scope_id,
+            session.agent_session_id,
+            session.agent_name,
+            session.workspace.path,
+        )
+        return session
 
     def _arm_idle_timeout(self, private_chat_scope_id: str) -> None:
         active_run = self._active_runs.get(private_chat_scope_id)

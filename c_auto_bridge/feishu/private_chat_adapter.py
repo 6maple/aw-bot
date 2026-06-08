@@ -1,6 +1,7 @@
 import logging
 
 from c_auto_bridge.core.use_cases import CoreUseCases, PrivateChatTextMessage, RunViewAction
+from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer
 from c_auto_bridge.feishu.gateway import IncomingCardAction
 from c_auto_bridge.feishu.message import IncomingMessage
 
@@ -9,8 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class FeishuPrivateChatAdapter:
-    def __init__(self, *, use_cases: CoreUseCases) -> None:
+    def __init__(self, *, use_cases: CoreUseCases, attachment_intake: AttachmentIntakeTracer | None = None) -> None:
         self._use_cases = use_cases
+        self._attachment_intake = attachment_intake
 
     async def handle_message(self, incoming: IncomingMessage) -> None:
         if incoming.chat_type != "p2p":
@@ -28,11 +30,15 @@ class FeishuPrivateChatAdapter:
             len(incoming.text),
             len(incoming.attachments),
         )
+        attachments = ()
+        if self._attachment_intake is not None:
+            attachments = await self._attachment_intake.cache_attachments(incoming)
         await self._use_cases.handle_private_chat_text(
             PrivateChatTextMessage(
                 private_chat_scope_id=incoming.chat_id,
                 user_id=incoming.user_id,
                 text=incoming.text,
+                attachments=attachments,
             )
         )
 

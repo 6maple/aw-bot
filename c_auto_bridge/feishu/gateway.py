@@ -5,10 +5,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, P2ImMessageReceiveV1
+from lark_oapi.api.im.v1 import (
+    CreateMessageRequest,
+    CreateMessageRequestBody,
+    GetMessageResourceRequest,
+    P2ImMessageReceiveV1,
+)
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
 from c_auto_bridge.feishu.message import IncomingMessage, parse_message_content
+from c_auto_bridge.feishu.attachment_intake import DownloadedAttachment
+from c_auto_bridge.feishu.message import IncomingAttachment
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +64,28 @@ class FeishuGateway:
         response = await self.client.im.v1.message.acreate(request)
         if not response.success():
             raise RuntimeError(f"send text failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
+
+    async def download(
+        self,
+        *,
+        message_id: str,
+        attachment: IncomingAttachment,
+    ) -> DownloadedAttachment:
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(attachment.resource_key)
+            .type(attachment.kind)
+            .build()
+        )
+        response = await self.client.im.v1.message.aget(request)
+        if not response.success():
+            raise RuntimeError(
+                f"download attachment failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}"
+            )
+        content = _downloaded_content(response)
+        file_name = attachment.file_name or _downloaded_file_name(response) or attachment.resource_key
+        return DownloadedAttachment(file_name=file_name, content=content)
 
     def on_message(self, data: P2ImMessageReceiveV1) -> None:
         message = data.event.message
@@ -118,6 +147,12 @@ class FeishuGateway:
         )
         return P2CardActionTriggerResponse()
 
+    def on_bot_p2p_chat_entered(self, data: Any) -> None:
+        logger.info("feishu bot p2p chat entered event ignored")
+
+    def on_bot_menu(self, data: Any) -> None:
+        logger.info("feishu bot menu event ignored")
+
     def _submit_with_logging(self, awaitable: Awaitable[None], *, label: str, event_id: str) -> None:
         try:
             future = self.submit(awaitable)
@@ -135,6 +170,8 @@ class FeishuGateway:
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self.on_message)
             .register_p2_card_action_trigger(self.on_card_action)
+            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self.on_bot_p2p_chat_entered)
+            .register_p2_application_bot_menu_v6(self.on_bot_menu)
             .build()
         )
 
@@ -147,3 +184,28 @@ def _log_submitted_exception(future, label: str, event_id: str) -> None:
         return
     if exc is not None:
         logger.error("feishu %s handler failed: event_id=%s", label, event_id, exc_info=(type(exc), exc, exc.__traceback__))
+
+
+def _downloaded_content(response) -> bytes:
+    for attr in ("file", "content", "data"):
+        value = getattr(response, attr, None)
+        if isinstance(value, bytes):
+            return value
+    data = getattr(response, "data", None)
+    if data is not None:
+        for attr in ("file", "content"):
+            value = getattr(data, attr, None)
+            if isinstance(value, bytes):
+                return value
+    raise RuntimeError("download attachment response did not include bytes")
+
+
+def _downloaded_file_name(response) -> str | None:
+    data = getattr(response, "data", None)
+    if data is None:
+        return None
+    for attr in ("file_name", "filename", "name"):
+        value = getattr(data, attr, None)
+        if isinstance(value, str):
+            return value
+    return None

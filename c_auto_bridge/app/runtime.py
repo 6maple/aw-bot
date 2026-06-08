@@ -22,6 +22,7 @@ from c_auto_bridge.core.agent_session import Workspace
 from c_auto_bridge.core.use_cases import CoreUseCases
 from c_auto_bridge.core.workspace import WorkspaceValidator
 from c_auto_bridge.feishu.gateway import FeishuGateway, IncomingCardAction
+from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer
 from c_auto_bridge.feishu.message import IncomingMessage
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 from c_auto_bridge.feishu.run_view_sink import FeishuRunViewSink
@@ -153,7 +154,13 @@ def build_runtime(
         clock=lambda: datetime.now().astimezone(),
         run_id_factory=lambda now: f"run_{now:%Y%m%d_%H%M%S_%f}",
     )
-    chat_adapter = FeishuPrivateChatAdapter(use_cases=use_cases)
+    chat_adapter = FeishuPrivateChatAdapter(
+        use_cases=use_cases,
+        attachment_intake=AttachmentIntakeTracer(
+            cache_dir=Path(config.data_dir) / "attachment_cache",
+            downloader=gateway,
+        ),
+    )
     listen = lambda: _listen(config.default_agent, rpc, opencode, event_handler, workspace=workspace)
     return RuntimeComponents(
         store=store,

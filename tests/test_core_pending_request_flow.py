@@ -135,6 +135,39 @@ class CorePendingRequestFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(persistence.closed_pending_requests[0], ("pending_1", "resolved"))
 
+    async def test_owner_text_answers_open_approval_pending_request(self) -> None:
+        agent = FakePendingAgentPort(
+            initial_events=[
+                ApprovalRequested("pending_1", "Run tests?", {"command": "pytest"}),
+            ],
+            resumed_events=[
+                TextDelta("approved"),
+                RunCompleted(),
+            ],
+        )
+        persistence = FakePendingPersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = build_use_cases(agent, persistence, run_view_sink)
+
+        first_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="run tests",
+            )
+        )
+        resumed_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="同意",
+            )
+        )
+
+        self.assertEqual(first_run.status, "pending_approval")
+        self.assertEqual(resumed_run.status, "completed")
+        self.assertEqual(agent.approval_answers, [("pending_1", "accept")])
+
     async def test_resumed_terminal_run_clears_pending_state_and_records_error(self) -> None:
         agent = FakePendingAgentPort(
             initial_events=[

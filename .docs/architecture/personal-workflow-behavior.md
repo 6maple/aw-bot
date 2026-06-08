@@ -14,6 +14,8 @@ While a Run is active, ordinary Chat messages become Queued Messages.
 
 Queued Messages received during the Message Merge Window are combined into one prompt for the next Agent Turn.
 
+If a Queued Message includes supported Attachments, those Attachments are preserved and passed to the next Agent Turn with the merged prompt.
+
 Interrupting commands bypass the queue:
 
 - `/stop`

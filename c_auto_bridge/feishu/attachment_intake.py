@@ -49,14 +49,14 @@ class AttachmentIntakeTracer:
         agent_session: AgentSession,
         message: IncomingMessage,
     ) -> object:
-        attachments = await self._cache_attachments(message)
+        attachments = await self.cache_attachments(message)
         return await agent.start_turn(
             agent_session=agent_session,
             prompt=message.text,
             attachments=attachments,
         )
 
-    async def _cache_attachments(self, message: IncomingMessage) -> tuple[Attachment, ...]:
+    async def cache_attachments(self, message: IncomingMessage) -> tuple[Attachment, ...]:
         cached_attachments: list[Attachment] = []
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         for attachment in message.attachments:

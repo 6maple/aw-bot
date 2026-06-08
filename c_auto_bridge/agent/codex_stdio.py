@@ -10,7 +10,7 @@ from c_auto_bridge.agent.codex_jsonrpc import CLIENT_INFO, JsonRpcError
 
 
 class CodexStdioClient:
-    def __init__(self, *, executable: str | None, codex_home: str):
+    def __init__(self, *, executable: str | None, codex_home: str | None):
         self.executable = executable
         self.codex_home = codex_home
         self.process: asyncio.subprocess.Process | None = None
@@ -26,7 +26,8 @@ class CodexStdioClient:
         if executable is None:
             raise RuntimeError("Codex CLI executable was not found on PATH")
         env = os.environ.copy()
-        env["CODEX_HOME"] = self.codex_home
+        if self.codex_home is not None:
+            env["CODEX_HOME"] = self.codex_home
         self.process = await asyncio.create_subprocess_exec(
             executable,
             "app-server",

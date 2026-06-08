@@ -1,11 +1,9 @@
 import asyncio
 import json
-import os
 from collections.abc import Awaitable, Callable, AsyncIterator
 from typing import Any, Protocol
 
 from c_auto_bridge.agent.codex_jsonrpc import CLIENT_INFO, JsonRpcError
-from c_auto_bridge.agent.codex_stdio import _find_codex_executable
 
 
 class CodexWebSocket(Protocol):
@@ -25,21 +23,14 @@ class CodexWebSocketClient:
         *,
         url: str,
         executable: str | None,
-        codex_home: str,
+        codex_home: str | None,
         connector: Callable[[str], Awaitable[CodexWebSocket]] | None = None,
-        process_factory: Callable[..., Awaitable[asyncio.subprocess.Process]] | None = None,
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        startup_timeout_seconds: float = 10,
     ) -> None:
         self.url = url
         self.executable = executable
         self.codex_home = codex_home
         self.connector = connector
-        self.process_factory = process_factory
-        self.sleep = sleep
-        self.startup_timeout_seconds = startup_timeout_seconds
         self.websocket: CodexWebSocket | None = None
-        self.process: asyncio.subprocess.Process | None = None
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -48,11 +39,7 @@ class CodexWebSocketClient:
     async def connect(self) -> None:
         if self.websocket is not None:
             return
-        try:
-            await self._connect_websocket()
-        except Exception:
-            await self._start_managed_server()
-            await self._wait_for_managed_server()
+        await self._connect_websocket()
         self._reader_task = asyncio.create_task(self._read_messages())
 
     async def initialize(self) -> dict[str, Any]:
@@ -89,50 +76,12 @@ class CodexWebSocketClient:
             await self.websocket.close()
         if self._reader_task is not None:
             await asyncio.gather(self._reader_task, return_exceptions=True)
-        if self.process is not None:
-            self.process.terminate()
-            await self.process.wait()
         self.websocket = None
-        self.process = None
         self._reader_task = None
 
     async def _connect_websocket(self) -> None:
         connector = self.connector or _connect_websocket
         self.websocket = await connector(self.url)
-
-    async def _start_managed_server(self) -> None:
-        executable = _find_codex_executable(self.executable)
-        if executable is None:
-            raise RuntimeError("Codex CLI executable was not found on PATH")
-        env = os.environ.copy()
-        env["CODEX_HOME"] = self.codex_home
-        process_factory = self.process_factory or asyncio.create_subprocess_exec
-        self.process = await process_factory(
-            executable,
-            "app-server",
-            "--listen",
-            self.url,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-
-    async def _wait_for_managed_server(self) -> None:
-        deadline = asyncio.get_running_loop().time() + self.startup_timeout_seconds
-        while asyncio.get_running_loop().time() < deadline:
-            if self.process is not None and self.process.returncode is not None:
-                raise RuntimeError(
-                    f"Codex App Server exited before becoming reachable: {self.process.returncode}"
-                )
-            try:
-                await self._connect_websocket()
-                return
-            except Exception:
-                await self.sleep(0.25)
-        if self.process is not None:
-            self.process.terminate()
-        raise RuntimeError(f"Codex App Server did not become reachable: {self.url}")
 
     async def _write(self, message: dict[str, Any]) -> None:
         if self.websocket is None:
