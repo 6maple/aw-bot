@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 
-from c_auto_bridge.core.agent_events import RunCompleted, RunInterrupted, TextDelta
+from c_auto_bridge.core.agent_events import ApprovalRequested, RunCompleted, RunInterrupted, TextDelta
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
 from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.run_view import RunView
@@ -200,6 +200,34 @@ class CoreInterruptingCommandsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop_run.status, "interrupted")
         self.assertEqual(agent.user_input_answers, [])
 
+    async def test_new_declines_pending_approval_instead_of_interrupting_turn(self) -> None:
+        agent = FakeInterruptingAgentPort(pending_mode=True, pending_kind="approval")
+        persistence = FakeInterruptingPersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = build_use_cases(agent, persistence, run_view_sink)
+
+        first_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="work",
+            )
+        )
+        reset_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="/new",
+            )
+        )
+
+        self.assertEqual(first_run.status, "pending_approval")
+        self.assertEqual(reset_run.status, "completed")
+        self.assertEqual(agent.approval_answers, [("pending_1", "cancel")])
+        self.assertEqual(agent.stopped_turn_ids, [])
+        self.assertEqual(agent.created_sessions, ["session_1", "session_2"])
+        self.assertEqual(persistence.closed_pending_requests, [("pending_1", "resolved")])
+
     async def test_reset_command_with_attachments_bypasses_active_run_queue(self) -> None:
         agent = FakeInterruptingAgentPort()
         persistence = FakeInterruptingPersistence()
@@ -263,16 +291,24 @@ class RunIdFactory:
 
 
 class FakeInterruptingAgentPort:
-    def __init__(self, pending_mode: bool = False, complete_after_stop: bool = False) -> None:
+    def __init__(
+        self,
+        pending_mode: bool = False,
+        complete_after_stop: bool = False,
+        pending_kind: str = "user_input",
+    ) -> None:
         self.pending_mode = pending_mode
         self.complete_after_stop = complete_after_stop
+        self.pending_kind = pending_kind
         self.created_sessions: list[str] = []
         self.started_prompts: list[str] = []
         self.started_attachments: list[tuple[Attachment, ...]] = []
         self.stopped_turn_ids: list[str] = []
         self.user_input_answers: list[str] = []
+        self.approval_answers: list[tuple[str, str]] = []
         self._active_turn = asyncio.Event()
         self._stop_first_turn = asyncio.Event()
+        self._approval_answered = asyncio.Event()
         self._session_counter = 0
         self._current_session: AgentSession | None = None
 
@@ -366,6 +402,11 @@ class FakeInterruptingAgentPort:
     async def _pending_events(self) -> AsyncIterator[object]:
         from c_auto_bridge.core.agent_events import UserInputRequested
 
+        if self.pending_kind == "approval":
+            yield ApprovalRequested("pending_1", "Run command?", {"command": "pytest"})
+            await self._approval_answered.wait()
+            yield RunCompleted()
+            return
         yield UserInputRequested("pending_1", "Which file?", {"field": "path"})
 
 
@@ -379,7 +420,8 @@ class FakeInterruptingTurn:
         self.port.user_input_answers.append(text)
 
     async def answer_approval(self, pending_request_id: str, decision: str) -> None:
-        raise AssertionError("approval is not used in these tests")
+        self.port.approval_answers.append((pending_request_id, decision))
+        self.port._approval_answered.set()
 
     async def stop(self) -> None:
         self.port.stopped_turn_ids.append(self.agent_turn.agent_turn_id)

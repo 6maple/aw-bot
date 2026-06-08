@@ -170,6 +170,60 @@ class CodexTranslatorTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_new_declines_pending_codex_approval_without_turn_interrupt(self) -> None:
+        async def run() -> None:
+            router = CodexEventRouter()
+            with TemporaryDirectory() as tmpdir:
+                rpc = ContinuingApprovalRpc(router=router)
+                adapter = CodexAppServerAdapter(config=_default_config(), store=FileStore(tmpdir), rpc=rpc, event_router=router)
+                persistence = FakeRunPersistence()
+                use_cases = CoreUseCases(
+                    agent=adapter,
+                    persistence=persistence,
+                    run_view_sink=FakeRunViewSink(),
+                    workspace=Workspace(path="D:/repo"),
+                    workspace_validator=WorkspaceValidator(
+                        home_directory="D:/Users/Maple",
+                        temp_directory="D:/Temp",
+                        system_directories=(),
+                    ),
+                    access_mode="workspace",
+                    agent_name="codex",
+                    clock=lambda: datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+                    run_id_factory=RunIdFactory(),
+                )
+
+                pending_task = asyncio.create_task(
+                    use_cases.handle_private_chat_text(
+                        PrivateChatTextMessage(
+                            private_chat_scope_id="chat_1",
+                            user_id="user_1",
+                            text="install dependency",
+                        )
+                    )
+                )
+                await rpc.wait_for_turn_start()
+                await router.handle_event(
+                    _request(9, "item/permissions/requestApproval", itemId="i", startedAtMs=1, reason="Need network")
+                )
+                first_run = await asyncio.wait_for(pending_task, timeout=1)
+
+                reset_run = await use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="/new",
+                    )
+                )
+
+            self.assertEqual(first_run.status, "pending_approval")
+            self.assertEqual(reset_run.status, "completed")
+            self.assertIn(("respond", 9, {"decision": "decline"}), rpc.calls)
+            self.assertNotIn("turn/interrupt", [call[0] for call in rpc.calls])
+            self.assertEqual(persistence.closed_pending_requests, [("9", "resolved")])
+
+        asyncio.run(run())
+
     def test_approval_decisions_map_accept_and_reject_synonyms_and_reject_unknown(self) -> None:
         async def run() -> None:
             for decision in ("approve", "accept", "allow"):

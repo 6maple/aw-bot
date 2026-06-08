@@ -147,7 +147,10 @@ class RunController:
 
     async def reset_session(self, *, private_chat_scope_id: str, user_id: str) -> Run:
         if self.has_any_active_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id):
-            run = await self.stop_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
+            run = await self._finish_run_for_session_reset(
+                private_chat_scope_id=private_chat_scope_id,
+                user_id=user_id,
+            )
         else:
             run = self._interrupted_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
         await self._clear_session_selection(private_chat_scope_id=private_chat_scope_id)
@@ -560,6 +563,29 @@ class RunController:
                 attachments=attachments,
             )
         return await self._agent.start_turn(agent_session=agent_session, prompt=prompt)
+
+    async def _finish_run_for_session_reset(self, *, private_chat_scope_id: str, user_id: str) -> Run:
+        active_run = self._require_active_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
+        pending = active_run.run_view.pending
+        if pending is None or pending.kind != "approval":
+            return await self.stop_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
+        logger.info(
+            "declining pending approval before session reset: run_id=%s chat_id=%s pending_id=%s",
+            active_run.run.run_id,
+            private_chat_scope_id,
+            pending.pending_request_id,
+        )
+        await active_run.turn_stream.answer_approval(pending.pending_request_id, "cancel")
+        await self._resolve_pending_request(active_run=active_run)
+        run = await self._consume_until_pause_or_terminal(private_chat_scope_id)
+        if run.status in TERMINAL_RUN_STATUSES:
+            return run
+        logger.warning(
+            "session reset approval decline did not finish run; interrupting fallback: run_id=%s status=%s",
+            run.run_id,
+            run.status,
+        )
+        return await self.stop_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
 
     async def _record_agent_session(self, agent_session: AgentSession) -> None:
         await self._persistence.save_agent_session(
