@@ -69,6 +69,12 @@ class IdleTimeoutStatus:
     scope_timeout_minutes: int | None
 
 
+@dataclass(frozen=True)
+class ApprovalDecisionRequired:
+    pending_request_id: str
+    message: str = "审批等待中，请回复“同意”继续，或回复“拒绝”取消。"
+
+
 class CoreUseCases:
     def __init__(
         self,
@@ -209,7 +215,12 @@ class CoreUseCases:
         if pending_approval_id is not None:
             decision = map_approval_decision(message.text)
             if decision is None:
-                raise ValueError("approval decision is required: reply 同意/拒绝 or approve/reject")
+                logger.info(
+                    "core received non-decision text while approval pending: chat_id=%s text_len=%s",
+                    message.private_chat_scope_id,
+                    len(message.text),
+                )
+                return ApprovalDecisionRequired(pending_request_id=pending_approval_id)
             logger.info(
                 "core routing text to pending approval: chat_id=%s decision=%s",
                 message.private_chat_scope_id,

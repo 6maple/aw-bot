@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from c_auto_bridge.core.attachments import Attachment
-from c_auto_bridge.core.use_cases import PrivateChatTextMessage, RunViewAction
+from c_auto_bridge.core.use_cases import ApprovalDecisionRequired, PrivateChatTextMessage, RunViewAction
 from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer, DownloadedAttachment
 from c_auto_bridge.feishu.gateway import IncomingCardAction
 from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMessage
@@ -91,6 +91,30 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(use_cases.text_messages, [])
 
+    async def test_invalid_text_while_approval_pending_sends_guidance(self) -> None:
+        use_cases = FakeUseCases()
+        use_cases.next_text_result = ApprovalDecisionRequired(pending_request_id="pending_1")
+        sent_texts: list[tuple[str, str]] = []
+        adapter = FeishuPrivateChatAdapter(
+            use_cases=use_cases,
+            send_text=lambda chat_id, text: _capture_sent_text(sent_texts, chat_id, text),
+        )
+
+        await adapter.handle_message(
+            IncomingMessage(
+                message_id="om_1",
+                chat_id="chat_1",
+                chat_type="p2p",
+                user_id="user_1",
+                text="继续了吗",
+            )
+        )
+
+        self.assertEqual(
+            sent_texts,
+            [("chat_1", "审批等待中，请回复“同意”继续，或回复“拒绝”取消。")],
+        )
+
     async def test_stop_card_action_becomes_stop_command(self) -> None:
         use_cases = FakeUseCases()
         adapter = FeishuPrivateChatAdapter(use_cases=use_cases)
@@ -128,9 +152,11 @@ class FakeUseCases:
     def __init__(self) -> None:
         self.text_messages: list[PrivateChatTextMessage] = []
         self.run_view_actions: list[RunViewAction] = []
+        self.next_text_result = None
 
-    async def handle_private_chat_text(self, message: PrivateChatTextMessage) -> None:
+    async def handle_private_chat_text(self, message: PrivateChatTextMessage):
         self.text_messages.append(message)
+        return self.next_text_result
 
     async def handle_run_view_action(self, action: RunViewAction) -> None:
         self.run_view_actions.append(action)
@@ -144,6 +170,10 @@ class FakeDownloader:
     async def download(self, *, message_id: str, attachment: IncomingAttachment) -> DownloadedAttachment:
         self.calls.append((message_id, attachment.kind, attachment.resource_key))
         return self.downloads[attachment.resource_key]
+
+
+async def _capture_sent_text(sent_texts: list[tuple[str, str]], chat_id: str, text: str) -> None:
+    sent_texts.append((chat_id, text))
 
 
 

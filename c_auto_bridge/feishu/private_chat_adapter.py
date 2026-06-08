@@ -1,6 +1,7 @@
 import logging
+from collections.abc import Awaitable, Callable
 
-from c_auto_bridge.core.use_cases import CoreUseCases, PrivateChatTextMessage, RunViewAction
+from c_auto_bridge.core.use_cases import ApprovalDecisionRequired, CoreUseCases, PrivateChatTextMessage, RunViewAction
 from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer
 from c_auto_bridge.feishu.gateway import IncomingCardAction
 from c_auto_bridge.feishu.message import IncomingMessage
@@ -10,9 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 class FeishuPrivateChatAdapter:
-    def __init__(self, *, use_cases: CoreUseCases, attachment_intake: AttachmentIntakeTracer | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        use_cases: CoreUseCases,
+        attachment_intake: AttachmentIntakeTracer | None = None,
+        send_text: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> None:
         self._use_cases = use_cases
         self._attachment_intake = attachment_intake
+        self._send_text = send_text
 
     async def handle_message(self, incoming: IncomingMessage) -> None:
         if incoming.chat_type != "p2p":
@@ -33,7 +41,7 @@ class FeishuPrivateChatAdapter:
         attachments = ()
         if self._attachment_intake is not None:
             attachments = await self._attachment_intake.cache_attachments(incoming)
-        await self._use_cases.handle_private_chat_text(
+        result = await self._use_cases.handle_private_chat_text(
             PrivateChatTextMessage(
                 private_chat_scope_id=incoming.chat_id,
                 user_id=incoming.user_id,
@@ -41,6 +49,14 @@ class FeishuPrivateChatAdapter:
                 attachments=attachments,
             )
         )
+        if isinstance(result, ApprovalDecisionRequired):
+            logger.info(
+                "private chat adapter sending approval decision guidance: message_id=%s pending_id=%s",
+                incoming.message_id,
+                result.pending_request_id,
+            )
+            if self._send_text is not None:
+                await self._send_text(incoming.chat_id, result.message)
 
     async def handle_card_action(self, incoming: IncomingCardAction) -> None:
         action = incoming.value.get("cmd") or incoming.value.get("action")

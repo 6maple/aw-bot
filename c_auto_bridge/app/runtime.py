@@ -160,6 +160,7 @@ def build_runtime(
             cache_dir=Path(config.data_dir) / "attachment_cache",
             downloader=gateway,
         ),
+        send_text=gateway.send_text,
     )
     listen = lambda: _listen(config.default_agent, rpc, opencode, event_handler, workspace=workspace)
     return RuntimeComponents(
