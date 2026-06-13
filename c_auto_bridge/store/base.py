@@ -52,6 +52,10 @@ class Store(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_private_chat_scope_ids(self, limit: int) -> list[str]:
+        raise NotImplementedError
+
+    @abstractmethod
     def save_card(self, card: StreamCardRef) -> None:
         raise NotImplementedError
 

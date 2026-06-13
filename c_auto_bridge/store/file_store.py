@@ -161,6 +161,28 @@ class FileStore(Store):
             runs.sort(key=lambda item: item.updated_at, reverse=True)
             return runs[:limit]
 
+    def list_private_chat_scope_ids(self, limit: int) -> list[str]:
+        with self._lock:
+            self.initialize()
+            scope_ids: dict[str, str] = {}
+            for item in read_json(self.run_index_path)["runs"]:
+                scope_id = item.get("scope_id")
+                updated_at = item.get("updated_at", "")
+                if not isinstance(scope_id, str) or not scope_id:
+                    continue
+                if scope_id not in scope_ids or updated_at > scope_ids[scope_id]:
+                    scope_ids[scope_id] = updated_at
+            for item in self._read_index()["sessions"]:
+                session = self.get_session(item["bot_session_id"])
+                if session is None:
+                    continue
+                if session.owner_chat_id not in scope_ids or session.updated_at > scope_ids[session.owner_chat_id]:
+                    scope_ids[session.owner_chat_id] = session.updated_at
+            return [
+                scope_id
+                for scope_id, _ in sorted(scope_ids.items(), key=lambda item: item[1], reverse=True)[:limit]
+            ]
+
     def save_card(self, card: StreamCardRef) -> None:
         with self._lock:
             self.initialize()

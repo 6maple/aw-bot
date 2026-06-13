@@ -132,6 +132,7 @@ def build_runtime(
         on_message=handle_message,
         on_card_action=handle_card_action,
         submit=async_runner.submit,
+        known_private_chat_ids=set(store.list_private_chat_scope_ids(limit=20)),
     )
     run_view_sink = FeishuRunViewSink(
         stream_card=StreamCard(

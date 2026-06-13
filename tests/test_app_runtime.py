@@ -14,6 +14,7 @@ from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMessage
 from c_auto_bridge.core.agent_session import Workspace
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 from c_auto_bridge.store.file_run_persistence import FileRunPersistence
+from c_auto_bridge.store.file_store import FileStore
 
 
 class AppRuntimeTest(unittest.TestCase):
@@ -91,6 +92,40 @@ class AppRuntimeTest(unittest.TestCase):
             )
 
         self.assertEqual(gateway.download_calls, [("om_1", "image", "img_1")])
+
+    def test_build_runtime_passes_recent_private_chat_scope_ids_to_gateway(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            data_dir = Path(tmpdir) / "data"
+            workspace.mkdir()
+            store = FileStore(data_dir)
+            store.save_run(
+                _run_ref(
+                    run_id="run_1",
+                    scope_id="chat_1",
+                    updated_at="2026-06-05T10:00:00+08:00",
+                )
+            )
+
+            components = build_runtime(
+                Config(data_dir=str(data_dir), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                rpc_factory=lambda **kwargs: FakeCodexRpc(kwargs=kwargs),
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path=None,
+                    home=None,
+                    workspace=str(workspace),
+                    c_auto_skill_path=None,
+                    model=None,
+                    sandbox="workspace-write",
+                    approval_policy=None,
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+            )
+
+        self.assertEqual(components.gateway.known_private_chat_ids, {"chat_1"})
 
     def test_build_runtime_uses_config_workspace_without_requiring_codex_overrides(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -240,13 +275,14 @@ class AppRuntimeTest(unittest.TestCase):
 
 
 class FakeGateway:
-    def __init__(self, app_id, app_secret, *, on_message, on_card_action, submit):
+    def __init__(self, app_id, app_secret, *, on_message, on_card_action, submit, known_private_chat_ids=None):
         self.app_id = app_id
         self.app_secret = app_secret
         self.on_message = on_message
         self.on_card_action = on_card_action
         self.submit = submit
         self.client = object()
+        self.known_private_chat_ids = set(known_private_chat_ids or ())
 
     def start(self) -> None:
         return None
@@ -260,6 +296,7 @@ class FakeGatewayWithDownloads(FakeGateway):
         self.downloads = downloads
         self.download_calls = []
         self.client = object()
+        self.known_private_chat_ids = set()
 
     async def download(self, *, message_id: str, attachment: IncomingAttachment) -> DownloadedAttachment:
         self.download_calls.append((message_id, attachment.kind, attachment.resource_key))
@@ -338,6 +375,22 @@ class FakeOpenCodeEventRouter:
 
     async def handle_stream_interruption(self, reason: str) -> None:
         self.interruptions.append(reason)
+
+
+def _run_ref(*, run_id: str, scope_id: str, updated_at: str):
+    from c_auto_bridge.store.models import RunRef
+
+    return RunRef(
+        run_id=run_id,
+        scope_id=scope_id,
+        bot_session_id="session_1",
+        agent="codex",
+        thread_id="thread_1",
+        turn_id="turn_1",
+        status="completed",
+        created_at=updated_at,
+        updated_at=updated_at,
+    )
 
 
 if __name__ == "__main__":
