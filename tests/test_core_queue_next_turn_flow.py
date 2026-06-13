@@ -267,6 +267,8 @@ class FakeQueuedAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> "FakeQueuedTurn":
         self.started_prompts.append(prompt)

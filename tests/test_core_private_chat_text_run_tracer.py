@@ -197,6 +197,7 @@ class CorePrivateChatTextRunTracerTest(unittest.IsolatedAsyncioTestCase):
                     workspace="/repo",
                     c_auto_skill_path=None,
                     model=None,
+                    models=(),
                     sandbox="workspace-write",
                     approval_policy=None,
                 ),
@@ -383,6 +384,8 @@ class FakeAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> FakeAgentTurnStream:
         self.started_prompts.append(prompt)
@@ -438,6 +441,8 @@ class FakeStaleSessionAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> FakeAgentTurnStream:
         self.started_session_ids.append(agent_session.agent_session_id)

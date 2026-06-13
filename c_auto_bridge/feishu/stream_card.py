@@ -7,6 +7,8 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import lark_oapi as lark
+from lark_oapi.core.const import APPLICATION_JSON, CONTENT_TYPE
+from lark_oapi.core.model import RequestOption
 from lark_oapi.api.cardkit.v1 import (
     Card,
     CreateCardRequest,
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 class CardTransport(Protocol):
     async def create_card(self, card: dict[str, Any]) -> str: ...
     async def send_card(self, chat_id: str, card_id: str) -> str: ...
+    async def send_card_to_user(self, open_id: str, card_id: str) -> str: ...
     async def update_card(self, card_id: str, card: dict[str, Any], sequence: int) -> None: ...
     async def close_card(self, card_id: str, sequence: int) -> None: ...
 
@@ -40,7 +43,7 @@ class LarkCardTransport:
         request = CreateCardRequest.builder().request_body(
             CreateCardRequestBody.builder().type("card_json").data(json.dumps(card, ensure_ascii=False)).build()
         ).build()
-        response = await self.client.cardkit.v1.card.acreate(request)
+        response = await self.client.cardkit.v1.card.acreate(request, _json_request_option())
         _require_success(response, "create card", card=card)
         card_id = response.data.card_id
         if not isinstance(card_id, str):
@@ -48,12 +51,18 @@ class LarkCardTransport:
         return card_id
 
     async def send_card(self, chat_id: str, card_id: str) -> str:
+        return await self._send_card("chat_id", chat_id, card_id)
+
+    async def send_card_to_user(self, open_id: str, card_id: str) -> str:
+        return await self._send_card("open_id", open_id, card_id)
+
+    async def _send_card(self, receive_id_type: str, receive_id: str, card_id: str) -> str:
         request = (
             CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
+            .receive_id_type(receive_id_type)
             .request_body(
                 CreateMessageRequestBody.builder()
-                .receive_id(chat_id)
+                .receive_id(receive_id)
                 .msg_type("interactive")
                 .content(json.dumps({"type": "card", "data": {"card_id": card_id}}))
                 .build()
@@ -80,7 +89,7 @@ class LarkCardTransport:
             )
             .build()
         )
-        _require_success(await self.client.cardkit.v1.card.aupdate(request), "update card", card=card)
+        _require_success(await self.client.cardkit.v1.card.aupdate(request, _json_request_option()), "update card", card=card)
 
     async def close_card(self, card_id: str, sequence: int) -> None:
         request = (
@@ -95,7 +104,7 @@ class LarkCardTransport:
             )
             .build()
         )
-        _require_success(await self.client.cardkit.v1.card.asettings(request), "close card")
+        _require_success(await self.client.cardkit.v1.card.asettings(request, _json_request_option()), "close card")
 
 
 class StreamCard:
@@ -175,3 +184,9 @@ def _require_success(response: Any, operation: str, *, card: dict[str, Any] | No
         if card is not None:
             logger.error("%s, card=%s", detail, json.dumps(card, ensure_ascii=False, sort_keys=True))
         raise RuntimeError(detail)
+
+
+def _json_request_option() -> RequestOption:
+    option = RequestOption()
+    option.headers[CONTENT_TYPE] = f"{APPLICATION_JSON}; charset=utf-8"
+    return option

@@ -358,6 +358,8 @@ class FakeInterruptingAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> "FakeInterruptingTurn":
         self.started_prompts.append(prompt)

@@ -10,6 +10,7 @@ from c_auto_bridge.config_codex import CodexConfig
 from c_auto_bridge.core.agent_events import AgentEvent, RunCompleted, RunFailed, RunInterrupted, RunTimedOut
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
 from c_auto_bridge.core.attachments import Attachment
+from c_auto_bridge.core.use_cases import SkillInfo
 from c_auto_bridge.ports.agent import AgentThreadNotFound, AgentTurnStreamPort
 from c_auto_bridge.store.base import Store
 from c_auto_bridge.session.models import SessionRef
@@ -53,6 +54,16 @@ class CodexAppServerAdapter:
         self.rpc = rpc
         self.event_router = event_router if event_router is not None else CodexEventRouter()
         self.clock = clock or (lambda: datetime.now().astimezone())
+
+    async def list_models(self, *, workspace: Workspace) -> tuple[str, ...]:
+        return self.config.models
+
+    async def list_skills(self, *, workspace: Workspace) -> tuple[SkillInfo, ...]:
+        payload = await self.rpc.request("skill/list", {"cwd": workspace.path})
+        skills = payload.get("skills")
+        if not isinstance(skills, list):
+            raise TypeError("skills must be a list")
+        return tuple(_skill_info(item) for item in skills)
 
     async def create_session(
         self,
@@ -134,6 +145,8 @@ class CodexAppServerAdapter:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> AgentTurnStreamPort:
         params: dict[str, Any] = {
@@ -142,8 +155,9 @@ class CodexAppServerAdapter:
             "input": _turn_input(prompt=prompt, attachments=attachments),
             "sandboxPolicy": self._sandbox_policy(agent_session.workspace),
         }
-        if self.config.model is not None:
-            params["model"] = self.config.model
+        selected_model = model if model is not None else self.config.model
+        if selected_model is not None:
+            params["model"] = selected_model
         if self.config.approval_policy is not None:
             params["approvalPolicy"] = self.config.approval_policy
         logger.info(
@@ -211,6 +225,18 @@ class CodexAppServerAdapter:
 def _is_thread_not_found(exc: JsonRpcError) -> bool:
     message = exc.error.get("message")
     return isinstance(message, str) and message.startswith("thread not found:")
+
+
+def _skill_info(payload: Any) -> SkillInfo:
+    if not isinstance(payload, dict):
+        raise TypeError("skill must be a dict")
+    name = payload.get("name")
+    if not isinstance(name, str):
+        raise TypeError("skill name must be a string")
+    description = payload.get("description")
+    if description is not None and not isinstance(description, str):
+        raise TypeError("skill description must be a string")
+    return SkillInfo(name=name, description=description)
 
 
 def _turn_input(*, prompt: str, attachments: tuple[Attachment, ...]) -> list[dict[str, Any]]:

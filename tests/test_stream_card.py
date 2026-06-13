@@ -1,8 +1,9 @@
 import asyncio
 from dataclasses import replace
+import json
 import unittest
 
-from c_auto_bridge.feishu.stream_card import StreamCard
+from c_auto_bridge.feishu.stream_card import LarkCardTransport, StreamCard
 from c_auto_bridge.react.state import initial_run_state
 
 
@@ -26,6 +27,28 @@ class StreamCardTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_lark_card_transport_sets_json_content_type_for_async_cardkit_requests(self) -> None:
+        async def run() -> None:
+            card = {"config": {"wide_screen_mode": True}, "elements": []}
+            client = FakeLarkClient()
+            transport = LarkCardTransport(client)
+
+            card_id = await transport.create_card(card)
+            await transport.update_card(card_id, card, 2)
+            await transport.close_card(card_id, 3)
+
+            self.assertEqual(
+                [option.headers["Content-Type"] for option in client.cardkit.v1.card.options],
+                [
+                    "application/json; charset=utf-8",
+                    "application/json; charset=utf-8",
+                    "application/json; charset=utf-8",
+                ],
+            )
+            self.assertEqual(json.loads(client.cardkit.v1.card.created.body.data), card)
+
+        asyncio.run(run())
+
 
 class Clock:
     value = 0.0
@@ -46,6 +69,63 @@ class FakeTransport:
         self.calls.append("update")
     async def close_card(self, card_id, sequence):
         self.calls.append("close")
+
+
+class FakeLarkClient:
+    def __init__(self):
+        self.cardkit = FakeCardkit()
+
+
+class FakeCardkit:
+    def __init__(self):
+        self.v1 = FakeCardkitV1()
+
+
+class FakeCardkitV1:
+    def __init__(self):
+        self.card = FakeCardResource()
+
+
+class FakeCardResource:
+    def __init__(self):
+        self.options = []
+        self.created = None
+
+    async def acreate(self, request, option=None):
+        self.created = request
+        self.options.append(option)
+        return FakeCreateCardResponse()
+
+    async def aupdate(self, request, option=None):
+        self.options.append(option)
+        return FakeSuccessResponse()
+
+    async def asettings(self, request, option=None):
+        self.options.append(option)
+        return FakeSuccessResponse()
+
+
+class FakeCreateCardResponse:
+    code = 0
+    msg = "ok"
+
+    def __init__(self):
+        self.data = FakeCreateCardData()
+
+    def success(self):
+        return True
+
+
+class FakeCreateCardData:
+    card_id = "card_1"
+
+
+class FakeSuccessResponse:
+    code = 0
+    msg = "ok"
+
+    def success(self):
+        return True
 
 
 async def _done():

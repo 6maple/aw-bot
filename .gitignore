@@ -1,5 +1,6 @@
 .tmp
 .cache
+.docs/issues
 
 .venv
 .data

@@ -12,6 +12,8 @@ from c_auto_bridge.config_opencode import OpenCodeConfig
 from c_auto_bridge.feishu.attachment_intake import DownloadedAttachment
 from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMessage
 from c_auto_bridge.core.agent_session import Workspace
+from c_auto_bridge.feishu.gateway import IncomingCardAction
+from c_auto_bridge.feishu.message import IncomingMenuEvent
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 from c_auto_bridge.store.file_run_persistence import FileRunPersistence
 from c_auto_bridge.store.file_store import FileStore
@@ -37,6 +39,7 @@ class AppRuntimeTest(unittest.TestCase):
                     workspace=str(workspace),
                     c_auto_skill_path=None,
                     model="test-model",
+                    models=("test-model",),
                     sandbox="workspace-write",
                     approval_policy="on-request",
                 ),
@@ -70,6 +73,7 @@ class AppRuntimeTest(unittest.TestCase):
                     workspace=str(workspace),
                     c_auto_skill_path=None,
                     model=None,
+                    models=(),
                     sandbox="workspace-write",
                     approval_policy=None,
                 ),
@@ -119,6 +123,7 @@ class AppRuntimeTest(unittest.TestCase):
                     workspace=str(workspace),
                     c_auto_skill_path=None,
                     model=None,
+                    models=(),
                     sandbox="workspace-write",
                     approval_policy=None,
                 ),
@@ -141,6 +146,7 @@ class AppRuntimeTest(unittest.TestCase):
                     workspace=tmpdir,
                     c_auto_skill_path=None,
                     model=None,
+                    models=(),
                     sandbox="workspace-write",
                     approval_policy=None,
                 ),
@@ -163,6 +169,7 @@ class AppRuntimeTest(unittest.TestCase):
                     workspace=tmpdir,
                     c_auto_skill_path=None,
                     model=None,
+                    models=(),
                     sandbox="workspace-write",
                     approval_policy=None,
                 ),
@@ -172,6 +179,120 @@ class AppRuntimeTest(unittest.TestCase):
             self.assertIsInstance(components.rpc, CodexStdioClient)
             self.assertIsNone(components.rpc.executable)
             self.assertIsNone(components.rpc.codex_home)
+
+    def test_build_runtime_wires_menu_callback_to_chat_adapter(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            codex_home = Path(tmpdir) / "codex-home"
+            workspace.mkdir()
+            codex_home.mkdir()
+
+            components = build_runtime(
+                Config(data_dir=str(Path(tmpdir) / "data"), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                rpc_factory=lambda **kwargs: FakeCodexRpc(),
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path="codex",
+                    home=str(codex_home),
+                    workspace=str(workspace),
+                    c_auto_skill_path=None,
+                    model="test-model",
+                    models=("test-model",),
+                    sandbox="workspace-write",
+                    approval_policy="on-request",
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+                menu_card_transport_factory=lambda client: client,
+            )
+
+            components.async_runner.run(
+                components.gateway.on_menu(
+                    IncomingMenuEvent(
+                        user_id="ou_1",
+                        event_key="aw_bot_menu()",
+                    )
+                )
+            )
+
+            self.assertEqual(components.gateway.user_cards_sent, [("ou_1", "card_1")])
+            self.assertEqual(components.gateway.cards_sent, [])
+            self.assertNotIn("menu:agent:plan", _card_commands(components.gateway.cards_created[0]))
+            self.assertNotIn("menu:agent:build", _card_commands(components.gateway.cards_created[0]))
+
+    def test_build_runtime_shows_plan_build_menu_only_for_opencode(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+
+            components = build_runtime(
+                Config(data_dir=str(Path(tmpdir) / "data"), default_agent="opencode"),
+                app_id="app_id",
+                app_secret="app_secret",
+                opencode_client_factory=lambda url: FakeOpenCodeClient(),
+                opencode_config_factory=lambda: OpenCodeConfig(
+                    server_url="http://127.0.0.1:4096",
+                    workspace=str(workspace),
+                    model=None,
+                    agent=None,
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+                menu_card_transport_factory=lambda client: client,
+            )
+
+            components.async_runner.run(
+                components.gateway.on_menu(
+                    IncomingMenuEvent(
+                        user_id="ou_1",
+                        event_key="aw_bot_menu()",
+                    )
+                )
+            )
+
+            commands = _card_commands(components.gateway.cards_created[0])
+            self.assertIn("menu:agent:plan", commands)
+            self.assertIn("menu:agent:build", commands)
+
+    def test_build_runtime_sends_card_actions_to_chat_not_user(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            codex_home = Path(tmpdir) / "codex-home"
+            workspace.mkdir()
+            codex_home.mkdir()
+
+            components = build_runtime(
+                Config(data_dir=str(Path(tmpdir) / "data"), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                rpc_factory=lambda **kwargs: FakeCodexRpc(),
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path="codex",
+                    home=str(codex_home),
+                    workspace=str(workspace),
+                    c_auto_skill_path=None,
+                    model="test-model",
+                    models=("test-model",),
+                    sandbox="workspace-write",
+                    approval_policy="on-request",
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+                menu_card_transport_factory=lambda client: client,
+            )
+
+            components.async_runner.run(
+                components.gateway.on_card_action(
+                    IncomingCardAction(
+                        chat_id="oc_1",
+                        user_id="ou_1",
+                        value={"cmd": "menu:help"},
+                    )
+                )
+            )
+
+            self.assertEqual(components.gateway.cards_sent, [("oc_1", "card_1")])
+            self.assertEqual(components.gateway.user_cards_sent, [])
 
     def test_build_runtime_uses_codex_websocket_when_url_is_configured(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -195,6 +316,7 @@ class AppRuntimeTest(unittest.TestCase):
                     workspace=str(workspace),
                     c_auto_skill_path=None,
                     model=None,
+                    models=(),
                     sandbox="workspace-write",
                     approval_policy=None,
                 ),
@@ -275,19 +397,51 @@ class AppRuntimeTest(unittest.TestCase):
 
 
 class FakeGateway:
-    def __init__(self, app_id, app_secret, *, on_message, on_card_action, submit, known_private_chat_ids=None):
+    def __init__(
+        self,
+        app_id,
+        app_secret,
+        *,
+        on_message,
+        on_menu,
+        on_card_action,
+        submit,
+        known_private_chat_ids=None,
+    ):
         self.app_id = app_id
         self.app_secret = app_secret
         self.on_message = on_message
+        self.on_menu = on_menu
         self.on_card_action = on_card_action
         self.submit = submit
-        self.client = object()
+        self.client = self
+        self.cards_created = []
+        self.cards_sent = []
+        self.user_cards_sent = []
         self.known_private_chat_ids = set(known_private_chat_ids or ())
 
     def start(self) -> None:
         return None
 
     async def send_text(self, chat_id: str, text: str) -> None:
+        return None
+
+    async def create_card(self, card):
+        self.cards_created.append(card)
+        return "card_1"
+
+    async def send_card(self, chat_id: str, card_id: str):
+        self.cards_sent.append((chat_id, card_id))
+        return "message_1"
+
+    async def send_card_to_user(self, open_id: str, card_id: str):
+        self.user_cards_sent.append((open_id, card_id))
+        return "message_1"
+
+    async def update_card(self, card_id, card, sequence):
+        return None
+
+    async def close_card(self, card_id, sequence):
         return None
 
 
@@ -375,6 +529,26 @@ class FakeOpenCodeEventRouter:
 
     async def handle_stream_interruption(self, reason: str) -> None:
         self.interruptions.append(reason)
+
+
+def _card_commands(card: dict) -> list[str]:
+    commands = []
+    for element in card["body"]["elements"]:
+        if element["tag"] == "action":
+            commands.extend(action["value"]["cmd"] for action in element["actions"])
+            continue
+        if element["tag"] == "column_set":
+            for column in element["columns"]:
+                commands.extend(
+                    child["value"]["cmd"]
+                    for child in column["elements"]
+                    if child["tag"] == "button"
+                )
+            continue
+        if element["tag"] != "button":
+            continue
+        commands.append(element["value"]["cmd"])
+    return commands
 
 
 def _run_ref(*, run_id: str, scope_id: str, updated_at: str):

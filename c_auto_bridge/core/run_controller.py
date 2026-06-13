@@ -59,6 +59,8 @@ class RunController:
         private_chat_scope_id: str,
         user_id: str,
         text: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> Run:
         if private_chat_scope_id in self._active_runs:
@@ -86,6 +88,8 @@ class RunController:
             user_id=user_id,
             agent_session=agent_session,
             prompt=text,
+            model=model,
+            opencode_agent=opencode_agent,
             attachments=attachments,
         )
         logger.info(
@@ -157,6 +161,11 @@ class RunController:
         await self._create_selected_session(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
         return run
 
+    async def clear_selected_session(self, *, private_chat_scope_id: str) -> None:
+        await self._persistence.clear_current_session(private_chat_scope_id=private_chat_scope_id)
+        self._fresh_session_scope_ids.add(private_chat_scope_id)
+        self._selected_sessions.pop(private_chat_scope_id, None)
+
     async def change_workspace(
         self,
         *,
@@ -224,6 +233,8 @@ class RunController:
         private_chat_scope_id: str,
         user_id: str,
         text: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> Run:
         active_run = self._require_active_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)
@@ -235,6 +246,8 @@ class RunController:
                 text=text,
                 attachments=attachments,
                 queued_at=self._clock(),
+                model=model,
+                opencode_agent=opencode_agent,
             )
         )
         logger.info(
@@ -429,7 +442,7 @@ class RunController:
                 private_chat_scope_id=private_chat_scope_id,
                 status=active_run.run_view.status,
             )
-        prompt, attachments, user_id, remaining = merged_prompt
+        prompt, attachments, user_id, model, opencode_agent, remaining = merged_prompt
         active_run.queued_messages = remaining
         logger.info(
             "starting queued next turn: previous_run_id=%s chat_id=%s merged_text_len=%s remaining_count=%s",
@@ -441,8 +454,13 @@ class RunController:
         agent_session, turn_stream = await self._start_turn_with_session_recovery(
             private_chat_scope_id=private_chat_scope_id,
             user_id=user_id,
-            agent_session=active_run.agent_session,
+            agent_session=await self._session_for_new_turn(
+                private_chat_scope_id=private_chat_scope_id,
+                user_id=user_id,
+            ),
             prompt=prompt,
+            model=model,
+            opencode_agent=opencode_agent,
             attachments=attachments,
         )
         now = self._clock().isoformat()
@@ -515,12 +533,16 @@ class RunController:
         user_id: str,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> tuple[AgentSession, AgentTurnStreamPort]:
         try:
             return agent_session, await self._start_agent_turn(
                 agent_session=agent_session,
                 prompt=prompt,
+                model=model,
+                opencode_agent=opencode_agent,
                 attachments=attachments,
             )
         except AgentThreadNotFound:
@@ -546,6 +568,8 @@ class RunController:
             return replacement, await self._start_agent_turn(
                 agent_session=replacement,
                 prompt=prompt,
+                model=model,
+                opencode_agent=opencode_agent,
                 attachments=attachments,
             )
 
@@ -554,15 +578,17 @@ class RunController:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None,
+        opencode_agent: str | None,
         attachments: tuple[Attachment, ...],
     ) -> AgentTurnStreamPort:
-        if attachments:
-            return await self._agent.start_turn(
-                agent_session=agent_session,
-                prompt=prompt,
-                attachments=attachments,
-            )
-        return await self._agent.start_turn(agent_session=agent_session, prompt=prompt)
+        return await self._agent.start_turn(
+            agent_session=agent_session,
+            prompt=prompt,
+            model=model,
+            opencode_agent=opencode_agent,
+            attachments=attachments,
+        )
 
     async def _finish_run_for_session_reset(self, *, private_chat_scope_id: str, user_id: str) -> Run:
         active_run = self._require_active_run(private_chat_scope_id=private_chat_scope_id, user_id=user_id)

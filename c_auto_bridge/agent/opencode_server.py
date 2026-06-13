@@ -23,6 +23,7 @@ from c_auto_bridge.core.agent_events import (
 )
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
 from c_auto_bridge.core.attachments import Attachment
+from c_auto_bridge.core.use_cases import SkillInfo
 from c_auto_bridge.ports.agent import AgentThreadNotFound, AgentTurnStreamPort
 from c_auto_bridge.session.models import SessionRef
 from c_auto_bridge.store.base import Store
@@ -40,6 +41,8 @@ class OpenCodeQuestionCapability:
 
 
 class OpencodeClient(Protocol):
+    async def list_providers(self, *, workspace: str) -> dict[str, Any]: ...
+    async def list_skills(self, *, workspace: str) -> list[dict[str, Any]]: ...
     async def create_session(self, *, title: str, workspace: str) -> dict[str, Any]: ...
     async def session_messages(self, *, session_id: str, workspace: str) -> list[dict[str, Any]]: ...
     async def prompt_async(
@@ -71,6 +74,16 @@ class OpenCodeServerAdapter:
         self.client = client
         self.event_router = event_router if event_router is not None else OpenCodeEventRouter()
         self.clock = clock or (lambda: datetime.now().astimezone())
+
+    async def list_models(self, *, workspace: Workspace) -> tuple[str, ...]:
+        providers = await self.client.list_providers(workspace=workspace.path)
+        return _provider_model_ids(providers)
+
+    async def list_skills(self, *, workspace: Workspace) -> tuple[SkillInfo, ...]:
+        payload = await self.client.list_skills(workspace=workspace.path)
+        if not isinstance(payload, list):
+            raise TypeError("skills must be a list")
+        return tuple(_skill_info(item) for item in payload)
 
     async def create_session(
         self,
@@ -153,6 +166,8 @@ class OpenCodeServerAdapter:
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None = None,
+        opencode_agent: str | None = None,
         attachments: tuple[Attachment, ...] = (),
     ) -> AgentTurnStreamPort:
         if attachments:
@@ -164,8 +179,8 @@ class OpenCodeServerAdapter:
                 session_id=agent_session.agent_session_id,
                 message_id=message_id,
                 text=prompt,
-                model=opencode_model_payload(self.config.model),
-                agent=self.config.agent,
+                model=opencode_model_payload(model if model is not None else self.config.model),
+                agent=opencode_agent if opencode_agent is not None else self.config.agent,
                 workspace=agent_session.workspace.path,
             )
         except OpencodeHttpError as exc:
@@ -724,6 +739,37 @@ def _question_capability_enabled(capability: OpenCodeQuestionCapability | None) 
         and capability.request_event == "question.asked"
         and capability.reply_endpoint == "/question/:requestID/reply"
     )
+
+
+def _provider_model_ids(payload: dict[str, Any]) -> tuple[str, ...]:
+    providers = payload.get("providers")
+    if not isinstance(providers, list):
+        raise TypeError("providers must be a list")
+    model_ids: list[str] = []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            raise TypeError("provider must be a dict")
+        provider_id = _required_str(provider, "id")
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            raise TypeError("models must be a dict")
+        for model_id in models:
+            if not isinstance(model_id, str):
+                raise TypeError("model id must be a string")
+            model_ids.append(f"{provider_id}/{model_id}")
+    return tuple(model_ids)
+
+
+def _skill_info(payload: Any) -> SkillInfo:
+    if not isinstance(payload, dict):
+        raise TypeError("skill must be a dict")
+    name = payload.get("name")
+    if not isinstance(name, str):
+        raise TypeError("skill name must be a string")
+    description = payload.get("description")
+    if description is not None and not isinstance(description, str):
+        raise TypeError("skill description must be a string")
+    return SkillInfo(name=name, description=description)
 
 
 def _question_request_event(properties: dict[str, Any]) -> AgentEvent:

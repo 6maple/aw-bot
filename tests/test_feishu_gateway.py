@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from c_auto_bridge.feishu.gateway import FeishuGateway, FeishuMessageBackfill
-from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMessage
+from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMenuEvent, IncomingMessage
 from c_auto_bridge.feishu.ws_keepalive import (
     LARK_WS_KEEPALIVE_DISABLED_MARKER,
     disable_websockets_builtin_keepalive,
@@ -23,6 +23,7 @@ class FeishuGatewayMessageTest(unittest.TestCase):
                 "app_id",
                 "app_secret",
                 on_message=_noop_message_handler,
+                on_menu=_noop_menu_handler,
                 on_card_action=_noop_card_action_handler,
                 submit=lambda value: value,
             )
@@ -34,7 +35,6 @@ class FeishuGatewayMessageTest(unittest.TestCase):
         gateway = object.__new__(FeishuGateway)
 
         self.assertIsNone(gateway.on_bot_p2p_chat_entered(object()))
-        self.assertIsNone(gateway.on_bot_menu(object()))
 
     def test_on_message_normalizes_file_attachment_message(self) -> None:
         gateway = object.__new__(FeishuGateway)
@@ -67,6 +67,24 @@ class FeishuGatewayMessageTest(unittest.TestCase):
             ],
         )
 
+    def test_on_menu_normalizes_exact_command_menu_event(self) -> None:
+        gateway = object.__new__(FeishuGateway)
+        calls = []
+        gateway.submit = lambda value: calls.append(value)
+        gateway.on_incoming_menu = lambda incoming: incoming
+
+        gateway.on_menu(_menu_event(event_key="aw_bot_menu()"))
+
+        self.assertEqual(
+            calls,
+            [
+                IncomingMenuEvent(
+                    user_id="ou_1",
+                    event_key="aw_bot_menu()",
+                )
+            ],
+        )
+
     def test_on_message_deduplicates_message_ids(self) -> None:
         gateway = object.__new__(FeishuGateway)
         calls = []
@@ -91,6 +109,19 @@ class FeishuGatewayMessageTest(unittest.TestCase):
                 )
             ],
         )
+
+    def test_event_handler_registers_menu_callback(self) -> None:
+        gateway = object.__new__(FeishuGateway)
+        gateway.on_message = lambda data: None
+        gateway.on_menu = lambda data: None
+        gateway.on_card_action = lambda data: None
+        gateway.on_bot_p2p_chat_entered = lambda data: None
+
+        handler = gateway._build_event_handler()
+
+        self.assertIn("p2.im.message.receive_v1", handler._processorMap)
+        self.assertIn("p2.application.bot.menu_v6", handler._processorMap)
+        self.assertIn("p2.card.action.trigger", handler._callback_processor_map)
 
     def test_bot_p2p_chat_entered_remembers_private_chat_for_backfill(self) -> None:
         gateway = object.__new__(FeishuGateway)
@@ -279,6 +310,20 @@ def _message_event(*, message_type: str, content: str):
     return type("Payload", (), {"event": event})()
 
 
+def _menu_event(*, event_key: str):
+    operator_id = type("OperatorId", (), {"open_id": "ou_1"})()
+    operator = type("Operator", (), {"operator_id": operator_id})()
+    event = type(
+        "Event",
+        (),
+        {
+            "event_key": event_key,
+            "operator": operator,
+        },
+    )()
+    return type("Payload", (), {"event": event})()
+
+
 def _history_message(
     *,
     message_id: str,
@@ -353,6 +398,10 @@ class FakeListResponse:
 
 
 async def _noop_message_handler(incoming):
+    return None
+
+
+async def _noop_menu_handler(incoming):
     return None
 
 
