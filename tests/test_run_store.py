@@ -64,11 +64,23 @@ class RunStoreTest(unittest.TestCase):
             self.assertEqual(store.get_card("card_1").status, "failed")
             self.assertIsNone(store.get_open_pending_by_user("owner_1"))
 
+    def test_lists_recent_private_chat_scope_ids_from_runs_and_sessions(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            store = FileStore(tmpdir)
+            store.save_session(_session("s_1", "chat_session", "2026-06-05T09:00:00+08:00"))
+            store.save_run(_run("run_old", "2026-06-05T10:00:00+08:00", scope_id="chat_old"))
+            store.save_run(_run("run_new", "2026-06-05T11:00:00+08:00", scope_id="chat_new"))
 
-def _run(run_id: str, updated_at: str) -> RunRef:
+            self.assertEqual(
+                store.list_private_chat_scope_ids(limit=2),
+                ["chat_new", "chat_old"],
+            )
+
+
+def _run(run_id: str, updated_at: str, *, scope_id: str = "chat_1") -> RunRef:
     return RunRef(
         run_id=run_id,
-        scope_id="chat_1",
+        scope_id=scope_id,
         bot_session_id="s_1",
         agent="codex",
         thread_id="thr_1",
@@ -124,6 +136,24 @@ def _pending():
         status="open",
         created_at="2026-06-05T10:00:00+08:00",
         updated_at="2026-06-05T10:00:00+08:00",
+    )
+
+
+def _session(bot_session_id: str, chat_id: str, updated_at: str):
+    from c_auto_bridge.session.models import SessionRef
+
+    return SessionRef(
+        bot_session_id=bot_session_id,
+        owner_feishu_user_id="owner_1",
+        owner_chat_id=chat_id,
+        agent="codex",
+        codex_thread_id="thr_1",
+        title="test",
+        cwd="D:/repo",
+        access_mode="workspace",
+        status="idle",
+        created_at="2026-06-05T09:00:00+08:00",
+        updated_at=updated_at,
     )
 
 

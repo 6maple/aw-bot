@@ -13,7 +13,7 @@ from c_auto_bridge.core.agent_events import (
 )
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
 from c_auto_bridge.core.run_view import PendingRequestView, RunView, UsageView
-from c_auto_bridge.core.use_cases import CoreUseCases, PrivateChatTextMessage, RunViewAction
+from c_auto_bridge.core.use_cases import ApprovalDecisionRequired, CoreUseCases, PrivateChatTextMessage, RunViewAction
 from c_auto_bridge.core.workspace import WorkspaceValidator
 
 
@@ -134,6 +134,82 @@ class CorePendingRequestFlowTest(unittest.IsolatedAsyncioTestCase):
             [("pending_1", "approval", {"command": "pytest"})],
         )
         self.assertEqual(persistence.closed_pending_requests[0], ("pending_1", "resolved"))
+
+    async def test_owner_text_answers_open_approval_pending_request(self) -> None:
+        agent = FakePendingAgentPort(
+            initial_events=[
+                ApprovalRequested("pending_1", "Run tests?", {"command": "pytest"}),
+            ],
+            resumed_events=[
+                TextDelta("approved"),
+                RunCompleted(),
+            ],
+        )
+        persistence = FakePendingPersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = build_use_cases(agent, persistence, run_view_sink)
+
+        first_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="run tests",
+            )
+        )
+        resumed_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="同意",
+            )
+        )
+
+        self.assertEqual(first_run.status, "pending_approval")
+        self.assertEqual(resumed_run.status, "completed")
+        self.assertEqual(agent.approval_answers, [("pending_1", "accept")])
+
+    async def test_non_decision_text_while_approval_pending_returns_guidance_without_interrupting_run(self) -> None:
+        agent = FakePendingAgentPort(
+            initial_events=[
+                ApprovalRequested("pending_1", "Run tests?", {"command": "pytest"}),
+            ],
+            resumed_events=[
+                TextDelta("approved"),
+                RunCompleted(),
+            ],
+        )
+        persistence = FakePendingPersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = build_use_cases(agent, persistence, run_view_sink)
+
+        first_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="run tests",
+            )
+        )
+        guidance = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="我刚才点了吗？",
+            )
+        )
+        resumed_run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="同意",
+            )
+        )
+
+        self.assertEqual(first_run.status, "pending_approval")
+        self.assertEqual(guidance, ApprovalDecisionRequired(pending_request_id="pending_1"))
+        self.assertEqual(resumed_run.status, "completed")
+        self.assertEqual(agent.started_prompts, ["run tests"])
+        self.assertEqual(agent.approval_answers, [("pending_1", "accept")])
+        self.assertEqual(persistence.closed_pending_requests, [("pending_1", "resolved")])
 
     async def test_resumed_terminal_run_clears_pending_state_and_records_error(self) -> None:
         agent = FakePendingAgentPort(

@@ -21,6 +21,7 @@ from c_auto_bridge.core.agent_events import (
     UserInputRequested,
 )
 from c_auto_bridge.core.agent_session import AgentSession, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.store.file_store import FileStore
 
 
@@ -1570,6 +1571,28 @@ class OpenCodeTranslatorTest(unittest.TestCase):
 
                 with self.assertRaisesRegex(ValueError, "OpenCode question support is unavailable"):
                     await agent_run.answer_user_input("path")
+
+        asyncio.run(run())
+
+    def test_start_turn_rejects_attachments_with_clear_error(self) -> None:
+        async def run() -> None:
+            with TemporaryDirectory() as tmpdir:
+                client = FakeClient()
+                adapter = OpenCodeServerAdapter(
+                    config=_config(),
+                    store=FileStore(tmpdir),
+                    client=client,
+                    clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
+                )
+
+                with self.assertRaisesRegex(ValueError, "OpenCode attachments are not supported"):
+                    await adapter.start_turn(
+                        agent_session=_session(),
+                        prompt="fix",
+                        attachments=(Attachment(kind="file", path="D:/cache/a.txt", name="a.txt"),),
+                    )
+
+                self.assertEqual(client.calls, [])
 
         asyncio.run(run())
 

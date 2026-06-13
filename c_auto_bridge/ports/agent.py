@@ -3,6 +3,7 @@ from typing import Protocol
 
 from c_auto_bridge.core.agent_events import AgentEvent
 from c_auto_bridge.core.agent_session import AccessMode, AgentSession, Workspace
+from c_auto_bridge.core.attachments import Attachment
 
 
 class AgentThreadNotFound(RuntimeError):
@@ -56,5 +57,6 @@ class AgentPort(Protocol):
         *,
         agent_session: AgentSession,
         prompt: str,
+        attachments: tuple[Attachment, ...] = (),
     ) -> AgentTurnStreamPort:
         ...

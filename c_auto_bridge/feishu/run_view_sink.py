@@ -25,6 +25,8 @@ class FeishuRunViewSink:
         self._clock = clock
         self._cards: dict[str, StreamCardRef] = {}
         self._text_fallback_runs: set[str] = set()
+        self._text_fallback_pending_ids: set[tuple[str, str]] = set()
+        self._card_create_disabled_reason: str | None = None
 
     async def publish(self, *, private_chat_scope_id: str, run_view: RunView) -> None:
         state = _to_run_state(run_view)
@@ -40,14 +42,21 @@ class FeishuRunViewSink:
                 card is not None,
             )
         if card is None:
+            if self._card_create_disabled_reason is not None:
+                await self._publish_text_fallback(
+                    private_chat_scope_id=private_chat_scope_id,
+                    run_view=run_view,
+                    state=state,
+                    final=final,
+                )
+                return
             if run_view.run_id in self._text_fallback_runs:
-                if final:
-                    logger.info(
-                        "feishu text fallback final send: run_id=%s status=%s",
-                        run_view.run_id,
-                        run_view.status,
-                    )
-                    await self._send_text(private_chat_scope_id, render_text(state))
+                await self._publish_text_fallback(
+                    private_chat_scope_id=private_chat_scope_id,
+                    run_view=run_view,
+                    state=state,
+                    final=final,
+                )
                 return
             try:
                 card = await self._stream_card.create(
@@ -56,10 +65,23 @@ class FeishuRunViewSink:
                     state=state,
                     timestamp=self._clock(),
                 )
-            except Exception:
-                logger.exception("feishu card create failed: run_id=%s", run_view.run_id)
-                await self._send_text(private_chat_scope_id, render_text(state))
-                self._text_fallback_runs.add(run_view.run_id)
+            except Exception as exc:
+                if _is_card_permission_error(exc):
+                    self._card_create_disabled_reason = str(exc)
+                    logger.warning(
+                        "feishu cards disabled; missing card permission, falling back to text: run_id=%s error=%s",
+                        run_view.run_id,
+                        exc,
+                    )
+                else:
+                    logger.exception("feishu card create failed: run_id=%s", run_view.run_id)
+                await self._publish_text_fallback(
+                    private_chat_scope_id=private_chat_scope_id,
+                    run_view=run_view,
+                    state=state,
+                    final=final,
+                    first=True,
+                )
                 return
             self._cards[run_view.run_id] = card
             if not final:
@@ -77,6 +99,40 @@ class FeishuRunViewSink:
         if final:
             logger.info("feishu run view final card removed: run_id=%s", run_view.run_id)
             self._cards.pop(run_view.run_id, None)
+
+    async def _publish_text_fallback(
+        self,
+        *,
+        private_chat_scope_id: str,
+        run_view: RunView,
+        state: RunState,
+        final: bool,
+        first: bool = False,
+    ) -> None:
+        is_known_fallback = run_view.run_id in self._text_fallback_runs
+        if first or not is_known_fallback:
+            self._text_fallback_runs.add(run_view.run_id)
+            await self._send_text(private_chat_scope_id, render_text(state))
+            return
+        if state.pending is not None:
+            pending_key = (run_view.run_id, state.pending.pending_id)
+            if pending_key not in self._text_fallback_pending_ids:
+                self._text_fallback_pending_ids.add(pending_key)
+                logger.info(
+                    "feishu text fallback pending send: run_id=%s status=%s pending_id=%s",
+                    run_view.run_id,
+                    run_view.status,
+                    state.pending.pending_id,
+                )
+                await self._send_text(private_chat_scope_id, render_text(state))
+            return
+        if final:
+            logger.info(
+                "feishu text fallback final send: run_id=%s status=%s",
+                run_view.run_id,
+                run_view.status,
+            )
+            await self._send_text(private_chat_scope_id, render_text(state))
 
 
 def _to_run_state(run_view: RunView) -> RunState:
@@ -114,3 +170,8 @@ def _to_pending_state(pending: PendingRequestView | None) -> PendingState | None
         prompt=pending.prompt,
         payload=pending.payload,
     )
+
+
+def _is_card_permission_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "cardkit:card:write" in message or "99991672" in message

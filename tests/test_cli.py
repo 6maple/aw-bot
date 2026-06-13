@@ -8,7 +8,7 @@ from c_auto_bridge.cli_opencode import check_opencode_model_available
 
 
 class CliTest(unittest.TestCase):
-    def test_validate_start_environment_reports_missing_codex_values(self) -> None:
+    def test_validate_start_environment_requires_only_lark_and_codex_cli_by_default(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("c_auto_bridge.cli_codex.shutil.which", return_value=None),
@@ -17,11 +17,96 @@ class CliTest(unittest.TestCase):
 
         messages = [message for passed, message in checks if not passed]
         self.assertIn("missing required Feishu env vars: LARK_APP_ID, LARK_APP_SECRET", messages)
+        self.assertIn("Codex CLI executable was not found on PATH", messages)
+        self.assertFalse(any("missing required Codex env vars" in message for message in messages))
+
+    def test_validate_start_environment_accepts_default_codex_stdio_config(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "LARK_APP_ID": "app_id",
+                "LARK_APP_SECRET": "app_secret",
+                "C_AUTO_DATA_DIR": os.path.join(tmpdir, "data"),
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("c_auto_bridge.cli_codex.shutil.which", return_value="C:/Codex/codex.exe"),
+            ):
+                checks = cli.validate_start_environment()
+
+        self.assertTrue(all(passed for passed, _ in checks), checks)
         self.assertIn(
-            "missing required Codex env vars: CODEX_HOME, CODEX_WORKSPACE, CODEX_MODEL, CODEX_SANDBOX, CODEX_APPROVAL_POLICY",
+            (True, "Codex App Server connection path: default stdio (codex app-server --listen stdio://)"),
+            checks,
+        )
+        self.assertIn(
+            (True, "Codex approval policy is on-request (interactive bridge default)"),
+            checks,
+        )
+
+    def test_validate_start_environment_reports_explicit_codex_websocket_override(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "LARK_APP_ID": "app_id",
+                "LARK_APP_SECRET": "app_secret",
+                "CODEX_APP_SERVER_URL": "ws://127.0.0.1:4500",
+                "C_AUTO_DATA_DIR": os.path.join(tmpdir, "data"),
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("c_auto_bridge.cli_codex.shutil.which", return_value="C:/Codex/codex.exe"),
+            ):
+                checks = cli.validate_start_environment()
+
+        self.assertTrue(all(passed for passed, _ in checks), checks)
+        self.assertIn(
+            (True, "Codex App Server connection path: explicit WebSocket override (ws://127.0.0.1:4500)"),
+            checks,
+        )
+        messages = [message for _, message in checks]
+        self.assertIn("Codex home path is not configured; Codex default will be used", messages)
+        self.assertIn("workspace path is not configured; bridge process cwd will be used", messages)
+        self.assertIn("Codex approval policy is on-request (interactive bridge default)", messages)
+        self.assertFalse(any("missing required Codex env vars" in message for message in messages))
+
+    def test_validate_start_environment_rejects_unsupported_codex_sandbox(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "LARK_APP_ID": "app_id",
+                "LARK_APP_SECRET": "app_secret",
+                "CODEX_SANDBOX": "danger-full-access",
+                "C_AUTO_DATA_DIR": os.path.join(tmpdir, "data"),
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("c_auto_bridge.cli_codex.shutil.which", return_value="C:/Codex/codex.exe"),
+            ):
+                checks = cli.validate_start_environment()
+
+        messages = [message for passed, message in checks if not passed]
+        self.assertIn(
+            "unsupported Codex sandbox: danger-full-access (only workspace-write is supported)",
             messages,
         )
-        self.assertIn("Codex CLI executable was not found on PATH", messages)
+
+    def test_validate_start_environment_rejects_unsupported_codex_approval_policy(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "LARK_APP_ID": "app_id",
+                "LARK_APP_SECRET": "app_secret",
+                "CODEX_APPROVAL_POLICY": "sometimes",
+                "C_AUTO_DATA_DIR": os.path.join(tmpdir, "data"),
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("c_auto_bridge.cli_codex.shutil.which", return_value="C:/Codex/codex.exe"),
+            ):
+                checks = cli.validate_start_environment()
+
+        messages = [message for passed, message in checks if not passed]
+        self.assertIn(
+            "unsupported Codex approval policy: sometimes (supported: never, on-request, untrusted)",
+            messages,
+        )
 
     def test_doctor_validates_codex_cli_and_paths_without_starting_server(self) -> None:
         with TemporaryDirectory() as tmpdir:
