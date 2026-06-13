@@ -7,6 +7,7 @@ import unittest
 
 from c_auto_bridge.core.agent_events import RunCompleted, TextDelta
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.run_view import RunView
 from c_auto_bridge.core.use_cases import CoreUseCases, PrivateChatTextMessage
 from c_auto_bridge.core.workspace import WorkspaceValidator
@@ -55,6 +56,7 @@ class CoreQueueNextTurnFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(final_run.status, "completed")
         self.assertEqual(agent.started_prompts, ["first", "second\nthird"])
+        self.assertEqual(agent.started_attachments, [(), ()])
         self.assertEqual(
             [run.run_id for run in persistence.created_runs],
             ["run_1", "run_2"],
@@ -91,6 +93,91 @@ class CoreQueueNextTurnFlowTest(unittest.IsolatedAsyncioTestCase):
 
         agent.release_first_turn()
         await first_run_task
+
+    async def test_queued_next_turn_preserves_merged_attachments(self) -> None:
+        clock = AdjustableClock(datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+        agent = FakeQueuedAgentPort()
+        persistence = FakeQueuePersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = build_use_cases(agent, persistence, run_view_sink, clock)
+
+        first_run_task = asyncio.create_task(
+            use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="first",
+                )
+            )
+        )
+        await agent.wait_for_started_prompts(1)
+        image = Attachment(kind="image", path="D:/cache/a.png", name="a.png")
+        file = Attachment(kind="file", path="D:/cache/b.txt", name="b.txt")
+
+        await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="second",
+                attachments=(image,),
+            )
+        )
+        clock.advance(seconds=1)
+        await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="",
+                attachments=(file,),
+            )
+        )
+
+        agent.release_first_turn()
+        final_run = await first_run_task
+
+        self.assertEqual(final_run.status, "completed")
+        self.assertEqual(agent.started_prompts, ["first", "second"])
+        self.assertEqual(agent.started_attachments, [(), (image, file)])
+
+    async def test_attachment_only_queued_message_starts_next_turn_without_prompt_newline(self) -> None:
+        clock = AdjustableClock(datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+        agent = FakeQueuedAgentPort()
+        persistence = FakeQueuePersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = build_use_cases(agent, persistence, run_view_sink, clock)
+
+        first_run_task = asyncio.create_task(
+            use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="first",
+                )
+            )
+        )
+        await agent.wait_for_started_prompts(1)
+        image = Attachment(kind="image", path="D:/cache/only.png", name="only.png")
+
+        queued_result = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="",
+                attachments=(image,),
+            )
+        )
+
+        self.assertEqual(queued_result.status, "running")
+        agent.release_first_turn()
+        final_run = await first_run_task
+
+        self.assertEqual(final_run.status, "completed")
+        self.assertEqual(agent.started_prompts, ["first", ""])
+        self.assertEqual(agent.started_attachments, [(), (image,)])
+        self.assertEqual(
+            [run.run_id for run in persistence.created_runs],
+            ["run_1", "run_2"],
+        )
 
 
 def build_use_cases(agent, persistence, run_view_sink, clock) -> CoreUseCases:
@@ -135,6 +222,7 @@ class FakeQueuedAgentPort:
     def __init__(self) -> None:
         self.sessions: list[AgentSession] = []
         self.started_prompts: list[str] = []
+        self.started_attachments: list[tuple[Attachment, ...]] = []
         self._first_turn_complete = asyncio.Event()
 
     async def get_or_create_session(
@@ -179,10 +267,12 @@ class FakeQueuedAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
-        model: str | None,
+        model: str | None = None,
         opencode_agent: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> "FakeQueuedTurn":
         self.started_prompts.append(prompt)
+        self.started_attachments.append(attachments)
         if len(self.started_prompts) == 1 and agent_session.private_chat_scope_id == "chat_1":
             return FakeQueuedTurn(
                 agent_turn=AgentTurn(agent_turn_id="turn_1"),

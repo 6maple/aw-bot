@@ -22,6 +22,7 @@ from c_auto_bridge.core.agent_session import Workspace
 from c_auto_bridge.core.use_cases import CoreUseCases
 from c_auto_bridge.core.workspace import WorkspaceValidator
 from c_auto_bridge.feishu.gateway import FeishuGateway, IncomingCardAction
+from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer
 from c_auto_bridge.feishu.message import IncomingMenuEvent, IncomingMessage
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 from c_auto_bridge.feishu.run_view_sink import FeishuRunViewSink
@@ -138,6 +139,7 @@ def build_runtime(
         on_menu=handle_menu,
         on_card_action=handle_card_action,
         submit=async_runner.submit,
+        known_private_chat_ids=set(store.list_private_chat_scope_ids(limit=20)),
     )
     run_view_sink = FeishuRunViewSink(
         stream_card=StreamCard(
@@ -180,6 +182,10 @@ def build_runtime(
         send_user_card=send_user_menu_card,
         send_text=gateway.send_text,
         show_opencode_agent_controls=config.default_agent == "opencode",
+        attachment_intake=AttachmentIntakeTracer(
+            cache_dir=Path(config.data_dir) / "attachment_cache",
+            downloader=gateway,
+        ),
     )
     listen = lambda: _listen(config.default_agent, rpc, opencode, event_handler, workspace=workspace)
     return RuntimeComponents(

@@ -4,14 +4,19 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from c_auto_bridge.app.runtime import _listen, build_runtime
+from c_auto_bridge.agent.codex_stdio import CodexStdioClient
+from c_auto_bridge.agent.codex_websocket import CodexWebSocketClient
 from c_auto_bridge.config import Config
 from c_auto_bridge.config_codex import CodexConfig
 from c_auto_bridge.config_opencode import OpenCodeConfig
+from c_auto_bridge.feishu.attachment_intake import DownloadedAttachment
+from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMessage
 from c_auto_bridge.core.agent_session import Workspace
 from c_auto_bridge.feishu.gateway import IncomingCardAction
 from c_auto_bridge.feishu.message import IncomingMenuEvent
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 from c_auto_bridge.store.file_run_persistence import FileRunPersistence
+from c_auto_bridge.store.file_store import FileStore
 
 
 class AppRuntimeTest(unittest.TestCase):
@@ -26,7 +31,7 @@ class AppRuntimeTest(unittest.TestCase):
                 Config(data_dir=str(Path(tmpdir) / "data"), default_agent="codex"),
                 app_id="app_id",
                 app_secret="app_secret",
-                rpc_factory=lambda **kwargs: FakeCodexRpc(),
+                rpc_factory=lambda **kwargs: FakeCodexRpc(kwargs=kwargs),
                 codex_config_factory=lambda: CodexConfig(
                     app_server_url=None,
                     cli_path="codex",
@@ -44,6 +49,136 @@ class AppRuntimeTest(unittest.TestCase):
             self.assertIsInstance(components.persistence, FileRunPersistence)
             self.assertIsInstance(components.chat_adapter, FeishuPrivateChatAdapter)
             self.assertEqual(components.use_cases._run_controller.workspace.path, str(workspace.resolve()))
+            self.assertEqual(components.rpc.kwargs, {"executable": "codex", "codex_home": str(codex_home)})
+
+    def test_build_runtime_wires_gateway_as_attachment_downloader(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            gateway = FakeGatewayWithDownloads(
+                downloads={
+                    "img_1": DownloadedAttachment(file_name="diagram.png", content=b"png"),
+                }
+            )
+
+            components = build_runtime(
+                Config(data_dir=str(Path(tmpdir) / "data"), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                rpc_factory=lambda **kwargs: FakeCodexRpc(kwargs=kwargs),
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path=None,
+                    home=None,
+                    workspace=str(workspace),
+                    c_auto_skill_path=None,
+                    model=None,
+                    models=(),
+                    sandbox="workspace-write",
+                    approval_policy=None,
+                ),
+                gateway_factory=lambda *args, **kwargs: gateway,
+            )
+
+            asyncio.run(
+                components.chat_adapter._attachment_intake.cache_attachments(
+                    IncomingMessage(
+                        message_id="om_1",
+                        chat_id="chat_1",
+                        chat_type="p2p",
+                        user_id="user_1",
+                        text="",
+                        attachments=(
+                            IncomingAttachment(kind="image", resource_key="img_1", file_name="diagram.png"),
+                        ),
+                    )
+                )
+            )
+
+        self.assertEqual(gateway.download_calls, [("om_1", "image", "img_1")])
+
+    def test_build_runtime_passes_recent_private_chat_scope_ids_to_gateway(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            data_dir = Path(tmpdir) / "data"
+            workspace.mkdir()
+            store = FileStore(data_dir)
+            store.save_run(
+                _run_ref(
+                    run_id="run_1",
+                    scope_id="chat_1",
+                    updated_at="2026-06-05T10:00:00+08:00",
+                )
+            )
+
+            components = build_runtime(
+                Config(data_dir=str(data_dir), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                rpc_factory=lambda **kwargs: FakeCodexRpc(kwargs=kwargs),
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path=None,
+                    home=None,
+                    workspace=str(workspace),
+                    c_auto_skill_path=None,
+                    model=None,
+                    models=(),
+                    sandbox="workspace-write",
+                    approval_policy=None,
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+            )
+
+        self.assertEqual(components.gateway.known_private_chat_ids, {"chat_1"})
+
+    def test_build_runtime_uses_config_workspace_without_requiring_codex_overrides(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            components = build_runtime(
+                Config(data_dir=str(Path(tmpdir) / "data"), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                rpc_factory=lambda **kwargs: FakeCodexRpc(kwargs=kwargs),
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path=None,
+                    home=None,
+                    workspace=tmpdir,
+                    c_auto_skill_path=None,
+                    model=None,
+                    models=(),
+                    sandbox="workspace-write",
+                    approval_policy=None,
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+            )
+
+            self.assertEqual(components.use_cases._run_controller.workspace.path, str(Path(tmpdir).resolve()))
+            self.assertEqual(components.rpc.kwargs, {"executable": None, "codex_home": None})
+
+    def test_build_runtime_defaults_to_codex_stdio_client_when_websocket_url_is_unset(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            components = build_runtime(
+                Config(data_dir=str(Path(tmpdir) / "data"), default_agent="codex"),
+                app_id="app_id",
+                app_secret="app_secret",
+                codex_config_factory=lambda: CodexConfig(
+                    app_server_url=None,
+                    cli_path=None,
+                    home=None,
+                    workspace=tmpdir,
+                    c_auto_skill_path=None,
+                    model=None,
+                    models=(),
+                    sandbox="workspace-write",
+                    approval_policy=None,
+                ),
+                gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
+            )
+
+            self.assertIsInstance(components.rpc, CodexStdioClient)
+            self.assertIsNone(components.rpc.executable)
+            self.assertIsNone(components.rpc.codex_home)
 
     def test_build_runtime_wires_menu_callback_to_chat_adapter(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -177,18 +312,20 @@ class AppRuntimeTest(unittest.TestCase):
                 codex_config_factory=lambda: CodexConfig(
                     app_server_url="ws://127.0.0.1:4500",
                     cli_path="codex",
-                    home=str(codex_home),
+                    home=None,
                     workspace=str(workspace),
                     c_auto_skill_path=None,
-                    model="test-model",
-                    models=("test-model",),
+                    model=None,
+                    models=(),
                     sandbox="workspace-write",
-                    approval_policy="on-request",
+                    approval_policy=None,
                 ),
                 gateway_factory=lambda *args, **kwargs: FakeGateway(*args, **kwargs),
             )
 
+            self.assertIsInstance(components.rpc, CodexWebSocketClient)
             self.assertEqual(components.rpc.url, "ws://127.0.0.1:4500")
+            self.assertIsNone(components.rpc.codex_home)
 
     def test_build_runtime_wires_opencode_core_runtime(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -260,7 +397,17 @@ class AppRuntimeTest(unittest.TestCase):
 
 
 class FakeGateway:
-    def __init__(self, app_id, app_secret, *, on_message, on_menu, on_card_action, submit):
+    def __init__(
+        self,
+        app_id,
+        app_secret,
+        *,
+        on_message,
+        on_menu,
+        on_card_action,
+        submit,
+        known_private_chat_ids=None,
+    ):
         self.app_id = app_id
         self.app_secret = app_secret
         self.on_message = on_message
@@ -271,6 +418,7 @@ class FakeGateway:
         self.cards_created = []
         self.cards_sent = []
         self.user_cards_sent = []
+        self.known_private_chat_ids = set(known_private_chat_ids or ())
 
     def start(self) -> None:
         return None
@@ -297,7 +445,22 @@ class FakeGateway:
         return None
 
 
+class FakeGatewayWithDownloads(FakeGateway):
+    def __init__(self, *, downloads):
+        self.downloads = downloads
+        self.download_calls = []
+        self.client = object()
+        self.known_private_chat_ids = set()
+
+    async def download(self, *, message_id: str, attachment: IncomingAttachment) -> DownloadedAttachment:
+        self.download_calls.append((message_id, attachment.kind, attachment.resource_key))
+        return self.downloads[attachment.resource_key]
+
+
 class FakeCodexRpc:
+    def __init__(self, kwargs=None) -> None:
+        self.kwargs = kwargs or {}
+
     async def connect(self) -> None:
         return None
 
@@ -386,6 +549,22 @@ def _card_commands(card: dict) -> list[str]:
             continue
         commands.append(element["value"]["cmd"])
     return commands
+
+
+def _run_ref(*, run_id: str, scope_id: str, updated_at: str):
+    from c_auto_bridge.store.models import RunRef
+
+    return RunRef(
+        run_id=run_id,
+        scope_id=scope_id,
+        bot_session_id="session_1",
+        agent="codex",
+        thread_id="thread_1",
+        turn_id="turn_1",
+        status="completed",
+        created_at=updated_at,
+        updated_at=updated_at,
+    )
 
 
 if __name__ == "__main__":

@@ -1,17 +1,24 @@
 import ast
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from c_auto_bridge.agent.codex_app_server import CodexAppServerAdapter, CodexEventRouter
+from c_auto_bridge.agent.codex_jsonrpc import JsonRpcError
 from c_auto_bridge.core.agent_events import RunCompleted, TextDelta
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.run import RunStatus
 from c_auto_bridge.core.run_view import RunView, UsageView
 from c_auto_bridge.core.use_cases import CoreUseCases, PrivateChatTextMessage
 from c_auto_bridge.core.workspace import WorkspaceValidator
+from c_auto_bridge.config_codex import CodexConfig
 from c_auto_bridge.ports.agent import AgentThreadNotFound
+from c_auto_bridge.store.file_store import FileStore
 
 
 class CorePrivateChatTextRunTracerTest(unittest.IsolatedAsyncioTestCase):
@@ -52,6 +59,7 @@ class CorePrivateChatTextRunTracerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.run_id, "run_1")
         self.assertEqual(run.status, "completed")
         self.assertEqual(agent.started_prompts, ["ship it"])
+        self.assertEqual(agent.started_attachments, [()])
         self.assertEqual(agent.sessions[0].workspace.path, "D:/Workspace/ai-projects/aw-bot")
         self.assertEqual(agent.sessions[0].access_mode, "workspace")
         self.assertEqual(persistence.created_runs[0].agent_session_id, "session_1")
@@ -104,6 +112,43 @@ class CorePrivateChatTextRunTracerTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_private_chat_supported_attachments_start_agent_turn_without_text(self) -> None:
+        agent = FakeAgentPort(events=[RunCompleted()])
+        persistence = FakeRunPersistence()
+        run_view_sink = FakeRunViewSink()
+        use_cases = CoreUseCases(
+            agent=agent,
+            persistence=persistence,
+            run_view_sink=run_view_sink,
+            workspace=Workspace(path="D:/Workspace/ai-projects/aw-bot"),
+            workspace_validator=WorkspaceValidator(
+                home_directory=Path("D:/Users/Maple"),
+                temp_directory=Path("D:/Temp"),
+                system_directories=(),
+            ),
+            access_mode="workspace",
+            agent_name="codex",
+            clock=lambda: FIXED_NOW,
+            run_id_factory=lambda now: "run_1",
+        )
+        attachments = (
+            Attachment(kind="image", path="D:/cache/diagram.png", name="diagram.png"),
+            Attachment(kind="file", path="D:/cache/notes.txt", name="notes.txt"),
+        )
+
+        run = await use_cases.handle_private_chat_text(
+            PrivateChatTextMessage(
+                private_chat_scope_id="chat_1",
+                user_id="user_1",
+                text="",
+                attachments=attachments,
+            )
+        )
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(agent.started_prompts, [""])
+        self.assertEqual(agent.started_attachments, [attachments])
+
     async def test_stale_agent_session_is_replaced_and_turn_is_retried(self) -> None:
         agent = FakeStaleSessionAgentPort()
         persistence = FakeRunPersistence()
@@ -138,6 +183,106 @@ class CorePrivateChatTextRunTracerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [session.agent_session_id for session in persistence.saved_agent_sessions],
             ["stale_session", "fresh_session"],
+        )
+
+    async def test_codex_thread_not_found_creates_replacement_session_and_continues_turn(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rpc = FakeRecoveringCodexRpc()
+            router = CodexEventRouter()
+            agent = CodexAppServerAdapter(
+                config=CodexConfig(
+                    app_server_url=None,
+                    cli_path=None,
+                    home=None,
+                    workspace="/repo",
+                    c_auto_skill_path=None,
+                    model=None,
+                    models=(),
+                    sandbox="workspace-write",
+                    approval_policy=None,
+                ),
+                store=FileStore(tmpdir),
+                rpc=rpc,
+                event_router=router,
+                clock=lambda: FIXED_NOW,
+            )
+            persistence = FakeRunPersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = CoreUseCases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path="/repo"),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=Path("/home/user"),
+                    temp_directory=Path("/tmp"),
+                    system_directories=(),
+                ),
+                access_mode="workspace",
+                agent_name="codex",
+                clock=lambda: FIXED_NOW,
+                run_id_factory=lambda now: "run_1",
+            )
+
+            run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="ship it",
+                    )
+                )
+            )
+            await asyncio.sleep(0)
+            await router.handle_event(
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": "fresh_thread",
+                        "turnId": "fresh_turn",
+                        "itemId": "msg_1",
+                        "delta": "ok",
+                    },
+                }
+            )
+            await router.handle_event(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "fresh_thread",
+                        "turnId": "fresh_turn",
+                        "turn": {"id": "fresh_turn", "items": [], "status": "completed"},
+                    },
+                }
+            )
+
+            run = await run_task
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(run.agent_session_id, "fresh_thread")
+        self.assertEqual(run.agent_turn_id, "fresh_turn")
+        self.assertEqual(run_view_sink.views[-1].text, "ok")
+        self.assertEqual(
+            [call[0] for call in rpc.calls],
+            ["thread/start", "turn/start", "thread/start", "turn/start"],
+        )
+        self.assertEqual(rpc.calls[0][1]["cwd"], "/repo")
+        self.assertEqual(rpc.calls[0][1], {"cwd": "/repo", "sandbox": "workspace-write"})
+        self.assertEqual(rpc.calls[1][1]["threadId"], "stale_thread")
+        self.assertEqual(rpc.calls[2][1], {"cwd": "/repo", "sandbox": "workspace-write"})
+        self.assertEqual(rpc.calls[3][1]["threadId"], "fresh_thread")
+        self.assertEqual(rpc.calls[3][1]["input"], [{"type": "text", "text": "ship it"}])
+        self.assertEqual(
+            rpc.calls[3][1]["sandboxPolicy"],
+            {
+                "type": "workspaceWrite",
+                "writableRoots": ["/repo"],
+                "networkAccess": False,
+            },
+        )
+        self.assertEqual(
+            [session.agent_session_id for session in persistence.saved_agent_sessions],
+            ["stale_thread", "fresh_thread"],
         )
 
     def test_core_modules_do_not_import_runtime_or_provider_adapters(self) -> None:
@@ -195,6 +340,7 @@ class FakeAgentPort:
         self._events = tuple(events)
         self.sessions: list[AgentSession] = []
         self.started_prompts: list[str] = []
+        self.started_attachments: list[tuple[Attachment, ...]] = []
 
     async def get_or_create_session(
         self,
@@ -238,10 +384,12 @@ class FakeAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
-        model: str | None,
+        model: str | None = None,
         opencode_agent: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> FakeAgentTurnStream:
         self.started_prompts.append(prompt)
+        self.started_attachments.append(attachments)
         return FakeAgentTurnStream(
             agent_turn=AgentTurn(agent_turn_id="turn_1"),
             _events=self._events,
@@ -293,8 +441,9 @@ class FakeStaleSessionAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
-        model: str | None,
+        model: str | None = None,
         opencode_agent: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> FakeAgentTurnStream:
         self.started_session_ids.append(agent_session.agent_session_id)
         if agent_session.agent_session_id == "stale_session":
@@ -303,6 +452,25 @@ class FakeStaleSessionAgentPort:
             agent_turn=AgentTurn(agent_turn_id="turn_1"),
             _events=(TextDelta("ok"), RunCompleted()),
         )
+
+
+class FakeRecoveringCodexRpc:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._thread_ids = iter(("stale_thread", "fresh_thread"))
+
+    async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        self.calls.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": next(self._thread_ids)}}
+        if method == "turn/start":
+            if params["threadId"] == "stale_thread":
+                raise JsonRpcError({"message": "thread not found: stale_thread"})
+            return {"turn": {"id": "fresh_turn"}}
+        raise AssertionError(f"unexpected Codex RPC method: {method}")
+
+    async def respond(self, request_id, result) -> None:
+        raise AssertionError("recovery flow should not respond to server requests")
 
 
 class FakeRunPersistence:

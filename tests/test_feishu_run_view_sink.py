@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 import unittest
 
-from c_auto_bridge.core.run_view import RunView, UsageView, initial_run_view
+from c_auto_bridge.core.run_view import PendingRequestView, RunView, UsageView, initial_run_view
 from c_auto_bridge.feishu.run_view_sink import FeishuRunViewSink
 from c_auto_bridge.store.models import StreamCardRef
 
@@ -46,6 +46,51 @@ class FeishuRunViewSinkTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(texts, [("chat_1", "hello")])
 
+    async def test_card_permission_failure_disables_future_card_creation_attempts(self) -> None:
+        texts: list[tuple[str, str]] = []
+        stream_card = PermissionFailingCreateStreamCard()
+        sink = FeishuRunViewSink(
+            stream_card=stream_card,
+            send_text=lambda chat_id, text: _capture_text(texts, chat_id, text),
+            clock=lambda: "2026-06-06T12:00:00+00:00",
+        )
+
+        await sink.publish(private_chat_scope_id="chat_1", run_view=initial_run_view("run_1"))
+        await sink.publish(private_chat_scope_id="chat_1", run_view=initial_run_view("run_2"))
+        await sink.publish(
+            private_chat_scope_id="chat_1",
+            run_view=replace(initial_run_view("run_2"), status="completed", text="done"),
+        )
+
+        self.assertEqual(stream_card.create_calls, 1)
+        self.assertEqual(texts, [("chat_1", "处理中…"), ("chat_1", "处理中…"), ("chat_1", "done")])
+
+    async def test_text_fallback_sends_pending_approval_prompt_after_card_permission_failure(self) -> None:
+        texts: list[tuple[str, str]] = []
+        sink = FeishuRunViewSink(
+            stream_card=PermissionFailingCreateStreamCard(),
+            send_text=lambda chat_id, text: _capture_text(texts, chat_id, text),
+            clock=lambda: "2026-06-06T12:00:00+00:00",
+        )
+
+        await sink.publish(private_chat_scope_id="chat_1", run_view=initial_run_view("run_1"))
+        await sink.publish(
+            private_chat_scope_id="chat_1",
+            run_view=replace(
+                initial_run_view("run_1"),
+                status="pending_approval",
+                pending=PendingRequestView("pending_1", "approval", "Run command?", {"command": "pytest"}),
+            ),
+        )
+
+        self.assertEqual(
+            texts,
+            [
+                ("chat_1", "处理中…"),
+                ("chat_1", "等待审批：\nRun command?\n\n回复“同意”继续，或回复“拒绝”取消。"),
+            ],
+        )
+
     async def test_publish_ignores_update_failure(self) -> None:
         sink = FeishuRunViewSink(
             stream_card=FailingUpdateStreamCard(),
@@ -77,6 +122,18 @@ class FakeStreamCard:
 class FailingCreateStreamCard:
     async def create(self, *, run_id: str, chat_id: str, state, timestamp: str) -> StreamCardRef:
         raise RuntimeError("boom")
+
+    async def update(self, card: StreamCardRef, state, *, final: bool) -> bool:
+        raise AssertionError("update should not be called when create fails")
+
+
+class PermissionFailingCreateStreamCard:
+    def __init__(self) -> None:
+        self.create_calls = 0
+
+    async def create(self, *, run_id: str, chat_id: str, state, timestamp: str) -> StreamCardRef:
+        self.create_calls += 1
+        raise RuntimeError("create card failed: code=99991672, msg=missing cardkit:card:write")
 
     async def update(self, card: StreamCardRef, state, *, final: bool) -> bool:
         raise AssertionError("update should not be called when create fails")

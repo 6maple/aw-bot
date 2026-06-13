@@ -8,6 +8,7 @@ import unittest
 
 from c_auto_bridge.core.agent_events import RunCompleted, TextDelta
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.run_view import RunView
 from c_auto_bridge.core.use_cases import (
     CoreUseCases,
@@ -837,6 +838,57 @@ class CoreWorkspaceCommandsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.created_sessions, ["session_1", "session_2"])
             self.assertEqual(agent.session_workspaces, [str(current_workspace_dir.resolve()), str(next_workspace_dir.resolve())])
             self.assertEqual(next_run.agent_session_id, "session_2")
+            self.assertEqual(agent.started_attachments, [(), ()])
+
+    async def test_cd_command_with_attachments_bypasses_active_run_queue(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            current_workspace_dir = Path(tmpdir) / "current"
+            next_workspace_dir = Path(tmpdir) / "next"
+            current_workspace_dir.mkdir()
+            next_workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(current_workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            file = Attachment(kind="file", path=str(Path(tmpdir) / "cmd.txt"), name="cmd.txt")
+
+            result = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text=f"/cd {next_workspace_dir}",
+                    attachments=(file,),
+                )
+            )
+            await first_run_task
+
+            self.assertEqual(result, WorkspaceChanged(workspace=Workspace(path=str(next_workspace_dir.resolve()))))
+            self.assertEqual(agent.stopped_turn_ids, ["turn_1"])
+            self.assertEqual(agent.started_prompts, ["work"])
+            self.assertEqual(agent.started_attachments, [()])
 
     async def test_ws_save_and_list_named_workspaces(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -942,6 +994,62 @@ class CoreWorkspaceCommandsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(persistence.cleared_session_scope_ids, ["chat_1"])
             self.assertEqual(agent.session_workspaces, [str(current_workspace_dir.resolve()), str(next_workspace_dir.resolve())])
             self.assertEqual(next_run.agent_session_id, "session_2")
+            self.assertEqual(agent.started_attachments, [(), ()])
+
+    async def test_ws_use_command_with_attachments_bypasses_active_run_queue(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            current_workspace_dir = Path(tmpdir) / "current"
+            next_workspace_dir = Path(tmpdir) / "next"
+            current_workspace_dir.mkdir()
+            next_workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            persistence.named_workspaces["next"] = NamedWorkspace(
+                name="next",
+                workspace=Workspace(path=str(next_workspace_dir.resolve())),
+                updated_at="2026-06-06T11:00:00+00:00",
+            )
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(current_workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            image = Attachment(kind="image", path=str(Path(tmpdir) / "cmd.png"), name="cmd.png")
+
+            result = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/ws use next",
+                    attachments=(image,),
+                )
+            )
+            await first_run_task
+
+            self.assertEqual(result, WorkspaceChanged(workspace=Workspace(path=str(next_workspace_dir.resolve()))))
+            self.assertEqual(agent.stopped_turn_ids, ["turn_1"])
+            self.assertEqual(agent.started_prompts, ["work"])
+            self.assertEqual(agent.started_attachments, [()])
 
     async def test_ws_remove_deletes_named_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1079,6 +1187,7 @@ class FakeWorkspaceAgentPort:
         self.started_prompts: list[str] = []
         self.started_models: list[str | None] = []
         self.started_opencode_agents: list[str | None] = []
+        self.started_attachments: list[tuple[Attachment, ...]] = []
         self.stopped_turn_ids: list[str] = []
         self._active_turn = asyncio.Event()
         self._stop_first_turn = asyncio.Event()
@@ -1139,12 +1248,14 @@ class FakeWorkspaceAgentPort:
         *,
         agent_session: AgentSession,
         prompt: str,
-        model: str | None,
+        model: str | None = None,
         opencode_agent: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> "FakeWorkspaceTurn":
         self.started_prompts.append(prompt)
         self.started_models.append(model)
         self.started_opencode_agents.append(opencode_agent)
+        self.started_attachments.append(attachments)
         turn_id = f"turn_{len(self.started_prompts)}"
         if len(self.started_prompts) == 1:
             return FakeWorkspaceTurn(

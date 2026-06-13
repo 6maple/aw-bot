@@ -22,6 +22,7 @@ from c_auto_bridge.core.agent_events import (
     UserInputRequested,
 )
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.use_cases import SkillInfo
 from c_auto_bridge.ports.agent import AgentThreadNotFound, AgentTurnStreamPort
 from c_auto_bridge.session.models import SessionRef
@@ -165,9 +166,12 @@ class OpenCodeServerAdapter:
         *,
         agent_session: AgentSession,
         prompt: str,
-        model: str | None,
+        model: str | None = None,
         opencode_agent: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> AgentTurnStreamPort:
+        if attachments:
+            raise ValueError("OpenCode attachments are not supported")
         message_id = _new_message_id(self.clock())
         queue = self.event_router.register(agent_session.agent_session_id, message_id)
         try:

@@ -20,8 +20,8 @@ from c_auto_bridge.core.agent_events import (
 
 @dataclass(frozen=True)
 class TranslatedCodexEvent:
-    turn_id: str
-    thread_id: str
+    turn_id: str | None
+    thread_id: str | None
     event: AgentEvent
     request_id: int | str | None = None
 
@@ -37,14 +37,19 @@ def translate_codex_event(raw: dict[str, Any]) -> TranslatedCodexEvent | None:
         "item/tool/requestUserInput",
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
+        "item/permissions/requestApproval",
         "thread/tokenUsage/updated",
         "turn/completed",
         "error",
     }:
         return None
     params = _required_dict(raw, "params")
-    turn_id = _required_str(params, "turnId")
-    thread_id = _required_str(params, "threadId")
+    thread_id = _optional_str(params, "threadId")
+    turn_id = _optional_str(params, "turnId")
+    if method == "turn/completed" and turn_id is None:
+        turn_id = _required_str(_required_dict(params, "turn"), "id")
+    if method != "thread/tokenUsage/updated" and turn_id is None and thread_id is None:
+        return None
     request_id = raw.get("id")
 
     if method == "item/agentMessage/delta":
@@ -68,6 +73,7 @@ def translate_codex_event(raw: dict[str, Any]) -> TranslatedCodexEvent | None:
     elif method in {
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
+        "item/permissions/requestApproval",
     }:
         if request_id is None:
             raise KeyError("id")
@@ -137,6 +143,15 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _required_str(payload: dict[str, Any], key: str) -> str:
     value = payload[key]
+    if not isinstance(value, str):
+        raise TypeError(f"{key} must be a string")
+    return value
+
+
+def _optional_str(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
     if not isinstance(value, str):
         raise TypeError(f"{key} must be a string")
     return value

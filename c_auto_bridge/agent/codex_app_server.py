@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
+import logging
 from typing import Any, Protocol
 
 from c_auto_bridge.agent.codex_jsonrpc import JsonRpcError
@@ -8,10 +9,14 @@ from c_auto_bridge.agent.codex_translator import translate_codex_event
 from c_auto_bridge.config_codex import CodexConfig
 from c_auto_bridge.core.agent_events import AgentEvent, RunCompleted, RunFailed, RunInterrupted, RunTimedOut
 from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.use_cases import SkillInfo
 from c_auto_bridge.ports.agent import AgentThreadNotFound, AgentTurnStreamPort
 from c_auto_bridge.store.base import Store
 from c_auto_bridge.session.models import SessionRef
+
+
+logger = logging.getLogger(__name__)
 
 
 class CodexRpc(Protocol):
@@ -140,20 +145,32 @@ class CodexAppServerAdapter:
         *,
         agent_session: AgentSession,
         prompt: str,
-        model: str | None,
+        model: str | None = None,
         opencode_agent: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> AgentTurnStreamPort:
+        params: dict[str, Any] = {
+            "threadId": agent_session.agent_session_id,
+            "cwd": agent_session.workspace.path,
+            "input": _turn_input(prompt=prompt, attachments=attachments),
+            "sandboxPolicy": self._sandbox_policy(agent_session.workspace),
+        }
+        selected_model = model if model is not None else self.config.model
+        if selected_model is not None:
+            params["model"] = selected_model
+        if self.config.approval_policy is not None:
+            params["approvalPolicy"] = self.config.approval_policy
+        logger.info(
+            "codex turn start requested: thread_id=%s cwd=%s sandbox=%s approval_policy=%s",
+            agent_session.agent_session_id,
+            agent_session.workspace.path,
+            self.config.sandbox,
+            self.config.approval_policy or "codex-default",
+        )
         try:
             result = await self.rpc.request(
                 "turn/start",
-                {
-                    "threadId": agent_session.agent_session_id,
-                    "cwd": agent_session.workspace.path,
-                    "input": [{"type": "text", "text": prompt}],
-                    "model": model if model is not None else self.config.model,
-                    "approvalPolicy": self.config.approval_policy,
-                    "sandboxPolicy": self._sandbox_policy(agent_session.workspace),
-                },
+                params,
             )
         except JsonRpcError as exc:
             if _is_thread_not_found(exc):
@@ -175,14 +192,23 @@ class CodexAppServerAdapter:
         )
 
     async def _start_thread(self, *, workspace: Workspace) -> str:
+        params: dict[str, Any] = {
+            "cwd": workspace.path,
+            "sandbox": self.config.sandbox,
+        }
+        if self.config.model is not None:
+            params["model"] = self.config.model
+        if self.config.approval_policy is not None:
+            params["approvalPolicy"] = self.config.approval_policy
+        logger.info(
+            "codex thread start requested: cwd=%s sandbox=%s approval_policy=%s",
+            workspace.path,
+            self.config.sandbox,
+            self.config.approval_policy or "codex-default",
+        )
         result = await self.rpc.request(
             "thread/start",
-            {
-                "cwd": workspace.path,
-                "model": self.config.model,
-                "approvalPolicy": self.config.approval_policy,
-                "sandbox": self.config.sandbox,
-            },
+            params,
         )
         return result["thread"]["id"]
 
@@ -211,6 +237,18 @@ def _skill_info(payload: Any) -> SkillInfo:
     if description is not None and not isinstance(description, str):
         raise TypeError("skill description must be a string")
     return SkillInfo(name=name, description=description)
+
+
+def _turn_input(*, prompt: str, attachments: tuple[Attachment, ...]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if prompt:
+        items.append({"type": "text", "text": prompt})
+    for attachment in attachments:
+        if attachment.kind == "image":
+            items.append({"type": "localImage", "path": attachment.path})
+        elif attachment.kind == "file":
+            items.append({"type": "mention", "path": attachment.path})
+    return items
 
 
 class CodexEventRouter:
@@ -327,16 +365,17 @@ class CodexTurnStream:
         )
 
     async def answer_approval(self, pending_request_id: str, decision: str) -> None:
+        codex_decision = _approval_decision(decision)
         raw_id, _, _ = self.event_router.take_request(
             turn_id=self.agent_turn.agent_turn_id,
             request_id=pending_request_id,
         )
-        await self.rpc.respond(raw_id, {"decision": _approval_decision(decision)})
+        await self.rpc.respond(raw_id, {"decision": codex_decision})
 
 
 def _approval_decision(decision: str) -> str:
-    if decision == "accept":
+    if decision in {"approve", "accept", "allow"}:
         return "accept"
-    if decision == "deny":
+    if decision in {"reject", "deny", "abort", "decline", "cancel"}:
         return "decline"
     raise ValueError(f"unsupported Codex approval decision: {decision}")

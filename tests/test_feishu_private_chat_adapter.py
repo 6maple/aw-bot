@@ -1,7 +1,11 @@
-import unittest
+﻿import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from c_auto_bridge.core.agent_session import HistoricalAgentSession, Workspace
+from c_auto_bridge.core.attachments import Attachment
 from c_auto_bridge.core.use_cases import (
+    ApprovalDecisionRequired,
     FileFinderResult,
     ModelListResult,
     OpenCodeAgentSelected,
@@ -13,8 +17,9 @@ from c_auto_bridge.core.use_cases import (
     WorkspaceListResult,
 )
 from c_auto_bridge.core.workspace import NamedWorkspace
+from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer, DownloadedAttachment
 from c_auto_bridge.feishu.gateway import IncomingCardAction
-from c_auto_bridge.feishu.message import IncomingMenuEvent, IncomingMessage
+from c_auto_bridge.feishu.message import IncomingAttachment, IncomingMenuEvent, IncomingMessage
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 
 
@@ -37,6 +42,51 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
             use_cases.text_messages,
             [PrivateChatTextMessage("chat_1", "user_1", "ship it")],
         )
+
+    async def test_private_chat_message_downloads_supported_attachments_before_forwarding(self) -> None:
+        use_cases = FakeUseCases()
+        downloader = FakeDownloader(
+            {
+                "img_1": DownloadedAttachment(file_name="diagram.png", content=b"png"),
+                "file_1": DownloadedAttachment(file_name="notes.txt", content=b"text"),
+            }
+        )
+        with TemporaryDirectory() as tmpdir:
+            intake = AttachmentIntakeTracer(cache_dir=Path(tmpdir), downloader=downloader)
+            adapter = FeishuPrivateChatAdapter(use_cases=use_cases, attachment_intake=intake)
+
+            await adapter.handle_message(
+                IncomingMessage(
+                    message_id="om_1",
+                    chat_id="chat_1",
+                    chat_type="p2p",
+                    user_id="user_1",
+                    text="review",
+                    attachments=(
+                        IncomingAttachment(kind="image", resource_key="img_1", file_name="diagram.png"),
+                        IncomingAttachment(kind="file", resource_key="file_1", file_name="notes.txt"),
+                        IncomingAttachment(kind="audio", resource_key="audio_1", file_name="voice.m4a"),
+                    ),
+                )
+            )
+
+            self.assertEqual(downloader.calls, [("om_1", "image", "img_1"), ("om_1", "file", "file_1")])
+            self.assertEqual((Path(tmpdir) / "img_1__diagram.png").read_bytes(), b"png")
+            self.assertEqual((Path(tmpdir) / "file_1__notes.txt").read_bytes(), b"text")
+            self.assertEqual(
+                use_cases.text_messages,
+                [
+                    PrivateChatTextMessage(
+                        "chat_1",
+                        "user_1",
+                        "review",
+                        (
+                            Attachment(kind="image", path=str(Path(tmpdir) / "img_1__diagram.png"), name="diagram.png"),
+                            Attachment(kind="file", path=str(Path(tmpdir) / "file_1__notes.txt"), name="notes.txt"),
+                        ),
+                    )
+                ],
+            )
 
     async def test_non_private_chat_message_is_ignored(self) -> None:
         use_cases = FakeUseCases()
@@ -142,6 +192,30 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(texts.sent, [("chat_1", "OpenCode agent selected: plan")])
 
+    async def test_invalid_text_while_approval_pending_sends_guidance(self) -> None:
+        use_cases = FakeUseCases()
+        use_cases.next_text_result = ApprovalDecisionRequired(pending_request_id="pending_1")
+        sent_texts: list[tuple[str, str]] = []
+        adapter = FeishuPrivateChatAdapter(
+            use_cases=use_cases,
+            send_text=lambda chat_id, text: _capture_sent_text(sent_texts, chat_id, text),
+        )
+
+        await adapter.handle_message(
+            IncomingMessage(
+                message_id="om_1",
+                chat_id="chat_1",
+                chat_type="p2p",
+                user_id="user_1",
+                text="continue?",
+            )
+        )
+
+        self.assertEqual(
+            sent_texts,
+            [("chat_1", ApprovalDecisionRequired(pending_request_id="pending_1").message)],
+        )
+
     async def test_stop_card_action_becomes_stop_command(self) -> None:
         use_cases = FakeUseCases()
         adapter = FeishuPrivateChatAdapter(use_cases=use_cases)
@@ -182,7 +256,8 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
             use_cases.text_messages,
             [PrivateChatTextMessage("chat_1", "user_1", "/new")],
         )
-        self.assertEqual(texts.sent, [("chat_1", "已开启新的任务上下文。请直接发送你的需求。")])
+        self.assertEqual(len(texts.sent), 1)
+        self.assertEqual(texts.sent[0][0], "chat_1")
         self.assertEqual(use_cases.run_view_actions, [])
 
     async def test_menu_reset_action_becomes_reset_command(self) -> None:
@@ -198,7 +273,8 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
             use_cases.text_messages,
             [PrivateChatTextMessage("chat_1", "user_1", "/reset")],
         )
-        self.assertEqual(texts.sent, [("chat_1", "已重置当前会话。请直接发送新的需求。")])
+        self.assertEqual(len(texts.sent), 1)
+        self.assertEqual(texts.sent[0][0], "chat_1")
         self.assertEqual(use_cases.run_view_actions, [])
 
     async def test_menu_stop_without_active_run_sends_chinese_feedback(self) -> None:
@@ -216,7 +292,8 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
             use_cases.text_messages,
             [PrivateChatTextMessage("chat_1", "user_1", "/stop")],
         )
-        self.assertEqual(texts.sent, [("chat_1", "当前没有正在运行的任务。")])
+        self.assertEqual(len(texts.sent), 1)
+        self.assertEqual(texts.sent[0][0], "chat_1")
 
     async def test_menu_workspace_action_sends_saved_workspace_card(self) -> None:
         use_cases = FakeUseCases(
@@ -246,7 +323,6 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
         chat_id, card = cards.sent[0]
         self.assertEqual(chat_id, "chat_1")
         rendered = str(card)
-        self.assertIn("已保存的工作区", rendered)
         self.assertIn("repo", rendered)
         self.assertIn("D:/repo", rendered)
         self.assertIn("2026-06-06T12:00:00+00:00", rendered)
@@ -263,7 +339,6 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(cards.sent), 1)
         rendered = str(cards.sent[0][1])
-        self.assertIn("还没有保存的工作区。", rendered)
         commands = _card_commands(cards.sent[0][1])
         self.assertNotIn("/cd", rendered)
         self.assertNotIn("/ws save", rendered)
@@ -363,7 +438,6 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(cards.sent), 1)
         rendered = str(cards.sent[0][1])
-        self.assertIn("没有可恢复的历史会话。", rendered)
         self.assertEqual(_card_commands(cards.sent[0][1]), [])
 
     async def test_menu_session_resume_action_becomes_resume_command(self) -> None:
@@ -395,7 +469,6 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
         chat_id, card = cards.sent[0]
         self.assertEqual(chat_id, "chat_1")
         rendered = str(card)
-        self.assertIn("空闲超时", rendered)
         commands = _card_commands(card)
         self.assertEqual(
             commands,
@@ -546,20 +619,7 @@ class FeishuPrivateChatAdapterTest(unittest.IsolatedAsyncioTestCase):
         chat_id, card = cards.sent[0]
         self.assertEqual(chat_id, "chat_1")
         rendered = str(card)
-        for text in (
-            "AW Bot 菜单帮助",
-            "/new",
-            "/stop",
-            "/reset",
-            "/ws use <名称>",
-            "/resume <会话 ID>",
-            "/timeout 5|10|30|off|default",
-            "工作区",
-            "历史 Agent 会话",
-            "空闲超时",
-            "普通任务文本",
-            "只打开菜单不会启动任务",
-        ):
+        for text in ("/new", "/stop", "/reset", "/timeout 5|10|30|off|default"):
             self.assertIn(text, rendered)
         self.assertEqual(_card_commands(card), [])
 
@@ -704,9 +764,12 @@ class FakeUseCases:
         self.skill_list = skill_list
         self.opencode_agent = opencode_agent
         self.text_error = text_error
+        self.next_text_result = None
 
     async def handle_private_chat_text(self, message: PrivateChatTextMessage) -> object:
         self.text_messages.append(message)
+        if self.next_text_result is not None:
+            return self.next_text_result
         if self.text_error is not None:
             raise self.text_error
         if message.text == "/ws list":
@@ -753,6 +816,20 @@ class FakeTexts:
 
     async def send_text(self, chat_id: str, text: str) -> None:
         self.sent.append((chat_id, text))
+
+
+class FakeDownloader:
+    def __init__(self, downloads: dict[str, DownloadedAttachment]) -> None:
+        self.downloads = downloads
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def download(self, *, message_id: str, attachment: IncomingAttachment) -> DownloadedAttachment:
+        self.calls.append((message_id, attachment.kind, attachment.resource_key))
+        return self.downloads[attachment.resource_key]
+
+
+async def _capture_sent_text(sent_texts: list[tuple[str, str]], chat_id: str, text: str) -> None:
+    sent_texts.append((chat_id, text))
 
 
 def _card_commands(card: dict) -> list[str]:

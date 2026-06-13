@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from c_auto_bridge.core.use_cases import (
+    ApprovalDecisionRequired,
     CoreUseCases,
     FileFinderResult,
     ModelListResult,
@@ -14,6 +15,7 @@ from c_auto_bridge.core.use_cases import (
     SkillListResult,
     WorkspaceListResult,
 )
+from c_auto_bridge.feishu.attachment_intake import AttachmentIntakeTracer
 from c_auto_bridge.feishu.gateway import IncomingCardAction
 from c_auto_bridge.feishu.message import IncomingMenuEvent, IncomingMessage
 
@@ -28,12 +30,14 @@ class FeishuPrivateChatAdapter:
         use_cases: CoreUseCases,
         send_card: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         send_user_card: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        attachment_intake: AttachmentIntakeTracer | None = None,
         send_text: Callable[[str, str], Awaitable[None]] | None = None,
         show_opencode_agent_controls: bool = False,
     ) -> None:
         self._use_cases = use_cases
         self._send_card = send_card
         self._send_user_card = send_user_card
+        self._attachment_intake = attachment_intake
         self._send_text = send_text
         self._show_opencode_agent_controls = show_opencode_agent_controls
 
@@ -53,11 +57,15 @@ class FeishuPrivateChatAdapter:
             len(incoming.text),
             len(incoming.attachments),
         )
+        attachments = ()
+        if self._attachment_intake is not None:
+            attachments = await self._attachment_intake.cache_attachments(incoming)
         result = await self._use_cases.handle_private_chat_text(
             PrivateChatTextMessage(
                 private_chat_scope_id=incoming.chat_id,
                 user_id=incoming.user_id,
                 text=incoming.text,
+                attachments=attachments,
             )
         )
         if isinstance(result, FileFinderResult):
@@ -68,6 +76,14 @@ class FeishuPrivateChatAdapter:
             await self._send_skill_list_result(incoming.chat_id, result)
         if isinstance(result, OpenCodeAgentSelected):
             await self._send_opencode_agent_selected(incoming.chat_id, result)
+        if isinstance(result, ApprovalDecisionRequired):
+            logger.info(
+                "private chat adapter sending approval decision guidance: message_id=%s pending_id=%s",
+                incoming.message_id,
+                result.pending_request_id,
+            )
+            if self._send_text is not None:
+                await self._send_text(incoming.chat_id, result.message)
 
     async def handle_menu(self, incoming: IncomingMenuEvent) -> None:
         logger.info(
