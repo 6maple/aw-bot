@@ -22,7 +22,7 @@ from c_auto_bridge.core.agent_session import Workspace
 from c_auto_bridge.core.use_cases import CoreUseCases
 from c_auto_bridge.core.workspace import WorkspaceValidator
 from c_auto_bridge.feishu.gateway import FeishuGateway, IncomingCardAction
-from c_auto_bridge.feishu.message import IncomingMessage
+from c_auto_bridge.feishu.message import IncomingMenuEvent, IncomingMessage
 from c_auto_bridge.feishu.private_chat_adapter import FeishuPrivateChatAdapter
 from c_auto_bridge.feishu.run_view_sink import FeishuRunViewSink
 from c_auto_bridge.feishu.stream_card import LarkCardTransport, StreamCard
@@ -61,6 +61,7 @@ def build_runtime(
     codex_config_factory: Callable[[], CodexConfig] = load_codex_config,
     opencode_config_factory: Callable[[], OpenCodeConfig] = load_opencode_config,
     gateway_factory: Callable[..., FeishuGateway] = FeishuGateway,
+    menu_card_transport_factory: Callable[[Any], Any] = LarkCardTransport,
 ) -> RuntimeComponents:
     store = store_factory(config.data_dir)
     persistence = persistence_factory(store)
@@ -120,6 +121,11 @@ def build_runtime(
             raise RuntimeError("runtime chat adapter is not attached")
         await chat_adapter.handle_message(incoming)
 
+    async def handle_menu(incoming: IncomingMenuEvent) -> None:
+        if chat_adapter is None:
+            raise RuntimeError("runtime chat adapter is not attached")
+        await chat_adapter.handle_menu(incoming)
+
     async def handle_card_action(incoming: IncomingCardAction) -> None:
         if chat_adapter is None:
             raise RuntimeError("runtime chat adapter is not attached")
@@ -129,6 +135,7 @@ def build_runtime(
         app_id,
         app_secret,
         on_message=handle_message,
+        on_menu=handle_menu,
         on_card_action=handle_card_action,
         submit=async_runner.submit,
     )
@@ -153,7 +160,27 @@ def build_runtime(
         clock=lambda: datetime.now().astimezone(),
         run_id_factory=lambda now: f"run_{now:%Y%m%d_%H%M%S_%f}",
     )
-    chat_adapter = FeishuPrivateChatAdapter(use_cases=use_cases)
+    menu_card_transport = menu_card_transport_factory(gateway.client)
+
+    async def send_chat_menu_card(chat_id: str, card: dict[str, Any]) -> None:
+        logger.info("runtime sending menu card: chat_id=%s", chat_id)
+        card_id = await menu_card_transport.create_card(card)
+        await menu_card_transport.send_card(chat_id, card_id)
+        logger.info("runtime menu card sent: chat_id=%s card_id=%s", chat_id, card_id)
+
+    async def send_user_menu_card(open_id: str, card: dict[str, Any]) -> None:
+        logger.info("runtime sending menu card: open_id=%s", open_id)
+        card_id = await menu_card_transport.create_card(card)
+        await menu_card_transport.send_card_to_user(open_id, card_id)
+        logger.info("runtime menu card sent: open_id=%s card_id=%s", open_id, card_id)
+
+    chat_adapter = FeishuPrivateChatAdapter(
+        use_cases=use_cases,
+        send_card=send_chat_menu_card,
+        send_user_card=send_user_menu_card,
+        send_text=gateway.send_text,
+        show_opencode_agent_controls=config.default_agent == "opencode",
+    )
     listen = lambda: _listen(config.default_agent, rpc, opencode, event_handler, workspace=workspace)
     return RuntimeComponents(
         store=store,

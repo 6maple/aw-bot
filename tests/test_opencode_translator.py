@@ -21,6 +21,7 @@ from c_auto_bridge.core.agent_events import (
     UserInputRequested,
 )
 from c_auto_bridge.core.agent_session import AgentSession, Workspace
+from c_auto_bridge.core.use_cases import SkillInfo
 from c_auto_bridge.store.file_store import FileStore
 
 
@@ -762,7 +763,11 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(
+                    agent_session=_session(),
+                    prompt="fix",
+                    model="test-provider/test-model-next",
+                )
                 events = agent_run.events
 
                 await router.handle_event(
@@ -815,7 +820,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="hi")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="hi", model=None)
                 client.messages = [
                     {
                         "info": {
@@ -847,7 +852,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     clock=lambda: datetime(2026, 6, 7, 16, 49, 13, 505720, tzinfo=timezone.utc),
                 )
 
-                await adapter.start_turn(agent_session=_session(), prompt="hi")
+                await adapter.start_turn(agent_session=_session(), prompt="hi", model=None)
 
             self.assertGreater(client.message_id, "msg_ea133c87c001DYV2kTDJnLkko2")
 
@@ -863,7 +868,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix", model=None)
                 client.messages = [
                     {
                         "info": {
@@ -911,7 +916,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix", model=None)
                 events = agent_run.events
 
                 await router.handle_event(
@@ -1003,7 +1008,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix", model=None)
                 events = agent_run.events
 
                 await router.handle_event(
@@ -1413,7 +1418,11 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(
+                    agent_session=_session(),
+                    prompt="fix",
+                    model="test-provider/test-model-next",
+                )
                 events = agent_run.events
                 pending = asyncio.create_task(anext(events))
                 await asyncio.sleep(0)
@@ -1527,11 +1536,33 @@ class OpenCodeTranslatorTest(unittest.TestCase):
             self.assertEqual(
                 client.calls,
                 [
-                    ("prompt", "fix"),
+                    ("prompt", "fix", {"providerID": "test-provider", "modelID": "test-model-next"}, "build"),
                     "abort",
                     ("permission", "perm_1", "once"),
                 ],
             )
+
+        asyncio.run(run())
+
+    def test_start_turn_uses_selected_opencode_agent(self) -> None:
+        async def run() -> None:
+            with TemporaryDirectory() as tmpdir:
+                client = FakeClient()
+                adapter = OpenCodeServerAdapter(
+                    config=_config(),
+                    store=FileStore(tmpdir),
+                    client=client,
+                    clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
+                )
+
+                await adapter.start_turn(
+                    agent_session=_session(),
+                    prompt="fix",
+                    model=None,
+                    opencode_agent="plan",
+                )
+
+            self.assertEqual(client.calls, [("prompt", "fix", {"providerID": "test-provider", "modelID": "test-model"}, "plan")])
 
         asyncio.run(run())
 
@@ -1545,7 +1576,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     client=client,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix", model=None)
 
                 await agent_run.answer_approval("perm_reject", "reject")
                 self.assertEqual(client.calls[-1], ("permission", "perm_reject", "reject"))
@@ -1566,7 +1597,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     client=client,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix", model=None)
 
                 with self.assertRaisesRegex(ValueError, "OpenCode question support is unavailable"):
                     await agent_run.answer_user_input("path")
@@ -1585,7 +1616,7 @@ class OpenCodeTranslatorTest(unittest.TestCase):
                     event_router=router,
                     clock=lambda: datetime(2026, 6, 2, 10, tzinfo=timezone.utc),
                 )
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix", model=None)
                 await router.handle_event(
                     {
                         "type": "message.updated",
@@ -1659,6 +1690,63 @@ class OpenCodeTranslatorTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_model_options_come_from_provider_model_api(self) -> None:
+        async def run() -> None:
+            with TemporaryDirectory() as tmpdir:
+                client = FakeClient()
+                client.providers = {
+                    "providers": [
+                        {
+                            "id": "test-provider",
+                            "models": {
+                                "test-model": {"id": "test-model"},
+                                "test-model-next": {"id": "test-model-next"},
+                            },
+                        }
+                    ]
+                }
+                adapter = OpenCodeServerAdapter(
+                    config=_config(),
+                    store=FileStore(tmpdir),
+                    client=client,
+                )
+
+                self.assertEqual(
+                    await adapter.list_models(workspace=Workspace(path="D:/repo")),
+                    (
+                        "test-provider/test-model",
+                        "test-provider/test-model-next",
+                    ),
+                )
+                self.assertEqual(client.calls, [("providers", "D:/repo")])
+
+        asyncio.run(run())
+
+    def test_skills_come_from_opencode_skills_api(self) -> None:
+        async def run() -> None:
+            with TemporaryDirectory() as tmpdir:
+                client = FakeClient()
+                client.skills = [
+                    {"name": "build", "description": "Build plans"},
+                    {"name": "debug"},
+                ]
+                adapter = OpenCodeServerAdapter(
+                    config=_config(),
+                    store=FileStore(tmpdir),
+                    client=client,
+                )
+
+                self.assertEqual(
+                    await adapter.list_skills(workspace=Workspace(path="D:/repo")),
+                    (
+                        SkillInfo(name="build", description="Build plans"),
+                        SkillInfo(name="debug", description=None),
+                    ),
+                )
+                self.assertEqual(client.calls, [("skills", "D:/repo")])
+
+        asyncio.run(run())
+
 
 class FakeClient:
     def __init__(self, session_id: str = "oc_1"):
@@ -1666,6 +1754,16 @@ class FakeClient:
         self.message_id = None
         self.session_id = session_id
         self.messages = []
+        self.providers = {"providers": []}
+        self.skills = []
+
+    async def list_providers(self, **kwargs):
+        self.calls.append(("providers", kwargs["workspace"]))
+        return self.providers
+
+    async def list_skills(self, **kwargs):
+        self.calls.append(("skills", kwargs["workspace"]))
+        return self.skills
 
     async def create_session(self, **kwargs):
         self.calls.append(("create", kwargs["title"]))
@@ -1676,7 +1774,7 @@ class FakeClient:
 
     async def prompt_async(self, **kwargs):
         self.message_id = kwargs["message_id"]
-        self.calls.append(("prompt", kwargs["text"]))
+        self.calls.append(("prompt", kwargs["text"], kwargs["model"], kwargs["agent"]))
         return True
 
     async def abort_session(self, **kwargs):

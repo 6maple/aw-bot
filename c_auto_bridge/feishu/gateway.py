@@ -8,7 +8,7 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, P2ImMessageReceiveV1
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
-from c_auto_bridge.feishu.message import IncomingMessage, parse_message_content
+from c_auto_bridge.feishu.message import IncomingMenuEvent, IncomingMessage, parse_message_content
 
 
 logger = logging.getLogger(__name__)
@@ -28,10 +28,12 @@ class FeishuGateway:
         app_secret: str,
         *,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
+        on_menu: Callable[[IncomingMenuEvent], Awaitable[None]],
         on_card_action: Callable[[IncomingCardAction], Awaitable[None]],
         submit: Callable[[Awaitable[None]], object],
     ):
         self.on_incoming_message = on_message
+        self.on_incoming_menu = on_menu
         self.on_incoming_card_action = on_card_action
         self.submit = submit
         self.client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
@@ -118,6 +120,24 @@ class FeishuGateway:
         )
         return P2CardActionTriggerResponse()
 
+    def on_menu(self, data) -> None:
+        event = data.event
+        operator_id = event.operator.operator_id
+        logger.info(
+            "feishu menu event received: event_key=%s has_open_id=%s",
+            event.event_key,
+            isinstance(operator_id.open_id, str),
+        )
+        incoming = IncomingMenuEvent(
+            user_id=operator_id.open_id,
+            event_key=event.event_key,
+        )
+        self._submit_with_logging(
+            self.on_incoming_menu(incoming),
+            label="menu",
+            event_id=event.event_key,
+        )
+
     def _submit_with_logging(self, awaitable: Awaitable[None], *, label: str, event_id: str) -> None:
         try:
             future = self.submit(awaitable)
@@ -131,12 +151,19 @@ class FeishuGateway:
         add_done_callback(lambda done: _log_submitted_exception(done, label, event_id))
 
     def _build_event_handler(self):
-        return (
+        handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self.on_message)
+            .register_p2_application_bot_menu_v6(self.on_menu)
             .register_p2_card_action_trigger(self.on_card_action)
             .build()
         )
+        logger.info(
+            "feishu event handler registered: processors=%s callbacks=%s",
+            sorted(handler._processorMap),
+            sorted(handler._callback_processor_map),
+        )
+        return handler
 
 
 def _log_submitted_exception(future, label: str, event_id: str) -> None:

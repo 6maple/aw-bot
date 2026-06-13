@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from c_auto_bridge.core.agent_session import AccessMode, HistoricalAgentSession, Workspace
@@ -14,6 +15,7 @@ from c_auto_bridge.ports.run_view_sink import RunViewSinkPort
 
 
 logger = logging.getLogger(__name__)
+_FILE_FINDER_EXCLUDED_DIRS = {".git", ".venv", "node_modules", ".data", ".cache"}
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,35 @@ class WorkspaceRemoved:
 
 
 @dataclass(frozen=True)
+class FileFinderResult:
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ModelListResult:
+    agent_name: str
+    models: tuple[str, ...]
+    selected_model: str | None
+
+
+@dataclass(frozen=True)
+class SkillInfo:
+    name: str
+    description: str | None
+
+
+@dataclass(frozen=True)
+class SkillListResult:
+    agent_name: str
+    skills: tuple[SkillInfo, ...]
+
+
+@dataclass(frozen=True)
+class OpenCodeAgentSelected:
+    agent: str
+
+
+@dataclass(frozen=True)
 class ResumeSessionList:
     sessions: tuple[HistoricalAgentSession, ...]
 
@@ -84,6 +115,9 @@ class CoreUseCases:
     ) -> None:
         self._clock = clock
         self._workspace_validator = workspace_validator
+        self._agent = agent
+        self._scope_models: dict[str, str] = {}
+        self._scope_opencode_agents: dict[str, str] = {}
         self._persistence = persistence
         self._run_controller = RunController(
             agent=agent,
@@ -189,6 +223,65 @@ class CoreUseCases:
             name = command.removeprefix("/ws remove ").strip()
             await self._persistence.remove_named_workspace(name=name)
             return WorkspaceRemoved(name=name)
+        if command == "/files":
+            raise ValueError("file query is required")
+        if command.startswith("/files "):
+            query = command.removeprefix("/files ").strip()
+            if query == "":
+                raise ValueError("file query is required")
+            workspace_path = Path(self._run_controller.workspace.path)
+            matches = tuple(
+                path
+                for path in _workspace_relative_file_paths(workspace_path, workspace_path)
+                if query in path
+            )
+            return FileFinderResult(paths=matches[:10])
+        if command == "/model":
+            models = await self._agent.list_models(workspace=self._run_controller.workspace)
+            return ModelListResult(
+                agent_name=self._run_controller.agent_name,
+                models=models,
+                selected_model=self._scope_models.get(message.private_chat_scope_id),
+            )
+        if command == "/skills":
+            skills = await self._agent.list_skills(workspace=self._run_controller.workspace)
+            return SkillListResult(
+                agent_name=self._run_controller.agent_name,
+                skills=tuple(SkillInfo(name=skill.name, description=skill.description) for skill in skills),
+            )
+        if command == "/agent":
+            raise ValueError("OpenCode agent value is required")
+        if command.startswith("/agent "):
+            opencode_agent = command.removeprefix("/agent ").strip()
+            if opencode_agent == "":
+                raise ValueError("OpenCode agent value is required")
+            if opencode_agent not in {"plan", "build"}:
+                raise ValueError(f"unknown OpenCode agent: {opencode_agent}")
+            if self._run_controller.agent_name != "opencode":
+                raise ValueError(f"/agent {opencode_agent} is only available for OpenCode")
+            self._scope_opencode_agents[message.private_chat_scope_id] = opencode_agent
+            await self._run_controller.clear_selected_session(
+                private_chat_scope_id=message.private_chat_scope_id,
+            )
+            return OpenCodeAgentSelected(agent=opencode_agent)
+        if command == "/model use":
+            raise ValueError("model value is required")
+        if command.startswith("/model use "):
+            model = command.removeprefix("/model use ").strip()
+            if model == "":
+                raise ValueError("model value is required")
+            models = await self._agent.list_models(workspace=self._run_controller.workspace)
+            if model not in models:
+                raise ValueError(f"unknown model: {model}")
+            self._scope_models[message.private_chat_scope_id] = model
+            await self._run_controller.clear_selected_session(
+                private_chat_scope_id=message.private_chat_scope_id,
+            )
+            return ModelListResult(
+                agent_name=self._run_controller.agent_name,
+                models=models,
+                selected_model=model,
+            )
         if self._run_controller.has_open_user_input_pending_request(
             private_chat_scope_id=message.private_chat_scope_id,
             user_id=message.user_id,
@@ -208,6 +301,8 @@ class CoreUseCases:
                 private_chat_scope_id=message.private_chat_scope_id,
                 user_id=message.user_id,
                 text=message.text,
+                model=self._scope_models.get(message.private_chat_scope_id),
+                opencode_agent=self._scope_opencode_agents.get(message.private_chat_scope_id),
             )
         if command == "/resume":
             logger.info("core routing command: chat_id=%s command=/resume", message.private_chat_scope_id)
@@ -242,6 +337,8 @@ class CoreUseCases:
             private_chat_scope_id=message.private_chat_scope_id,
             user_id=message.user_id,
             text=message.text,
+            model=self._scope_models.get(message.private_chat_scope_id),
+            opencode_agent=self._scope_opencode_agents.get(message.private_chat_scope_id),
         )
 
     async def handle_run_view_action(self, action: RunViewAction) -> Run:
@@ -266,3 +363,15 @@ def _command_name(command: str) -> str:
     if not command.startswith("/"):
         return "text"
     return command.split(maxsplit=1)[0]
+
+
+def _workspace_relative_file_paths(search_path: Path, root_path: Path) -> list[str]:
+    results: list[str] = []
+    for child in sorted(search_path.iterdir(), key=lambda path: path.name):
+        if child.is_dir():
+            if child.name in _FILE_FINDER_EXCLUDED_DIRS:
+                continue
+            results.extend(_workspace_relative_file_paths(child, root_path))
+        elif child.is_file():
+            results.append(child.relative_to(root_path).as_posix())
+    return results

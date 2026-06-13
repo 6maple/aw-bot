@@ -9,6 +9,11 @@ class AgentThreadNotFound(RuntimeError):
     pass
 
 
+class SkillInfo(Protocol):
+    name: str
+    description: str | None
+
+
 class AgentTurnStreamPort(Protocol):
     @property
     def agent_turn(self):
@@ -29,6 +34,12 @@ class AgentTurnStreamPort(Protocol):
 
 
 class AgentPort(Protocol):
+    async def list_models(self, *, workspace: Workspace) -> tuple[str, ...]:
+        ...
+
+    async def list_skills(self, *, workspace: Workspace) -> tuple[SkillInfo, ...]:
+        ...
+
     async def create_session(
         self,
         *,
@@ -56,5 +67,7 @@ class AgentPort(Protocol):
         *,
         agent_session: AgentSession,
         prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
     ) -> AgentTurnStreamPort:
         ...

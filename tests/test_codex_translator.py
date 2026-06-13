@@ -1,10 +1,11 @@
 import asyncio
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from c_auto_bridge.agent.codex_app_server import CodexAppServerAdapter, CodexEventRouter
 from c_auto_bridge.agent.codex_translator import translate_codex_event
-from c_auto_bridge.config_codex import CodexConfig
+from c_auto_bridge.config_codex import CodexConfig, load_codex_config
 from c_auto_bridge.core.agent_events import (
     ApprovalRequested,
     RunCompleted,
@@ -19,6 +20,7 @@ from c_auto_bridge.core.agent_events import (
     UserInputRequested,
 )
 from c_auto_bridge.core.agent_session import Workspace
+from c_auto_bridge.core.use_cases import SkillInfo
 from c_auto_bridge.store.file_store import FileStore
 
 
@@ -48,7 +50,7 @@ class CodexTranslatorTest(unittest.TestCase):
             with TemporaryDirectory() as tmpdir:
                 rpc = FakeRpc()
                 adapter = CodexAppServerAdapter(config=_config(), store=FileStore(tmpdir), rpc=rpc, event_router=router)
-                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix it")
+                agent_run = await adapter.start_turn(agent_session=_session(), prompt="fix it", model="test-model-next")
                 self.assertEqual(await anext(agent_run.events), TextDelta("early"))
 
                 await router.handle_event(_request(7, "item/tool/requestUserInput", itemId="i", questions=[{"id": "q", "header": "Path", "question": "Which path?"}]))
@@ -64,6 +66,7 @@ class CodexTranslatorTest(unittest.TestCase):
                 rpc.calls[0][1]["input"],
                 [{"type": "text", "text": "fix it"}],
             )
+            self.assertEqual(rpc.calls[0][1]["model"], "test-model-next")
             self.assertEqual(rpc.calls[1], ("respond", 7, {"answers": {"q": {"answers": ["src"]}}}))
             self.assertEqual(rpc.calls[2], ("respond", 8, {"decision": "decline"}))
 
@@ -98,16 +101,86 @@ class CodexTranslatorTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_codex_model_options_use_codex_models_or_configured_model(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "CODEX_HOME": "C:/Users/Maple/.codex",
+                "CODEX_WORKSPACE": "D:/repo",
+                "CODEX_MODEL": "test-model",
+                "CODEX_MODELS": "test-model,test-model-next",
+                "CODEX_SANDBOX": "workspace-write",
+                "CODEX_APPROVAL_POLICY": "on-request",
+            },
+            clear=True,
+        ):
+            explicit = load_codex_config()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "CODEX_HOME": "C:/Users/Maple/.codex",
+                "CODEX_WORKSPACE": "D:/repo",
+                "CODEX_MODEL": "test-model",
+                "CODEX_SANDBOX": "workspace-write",
+                "CODEX_APPROVAL_POLICY": "on-request",
+            },
+            clear=True,
+        ):
+            fallback = load_codex_config()
+
+        with TemporaryDirectory() as tmpdir:
+            explicit_adapter = CodexAppServerAdapter(config=explicit, store=FileStore(tmpdir), rpc=FakeRpc())
+            fallback_adapter = CodexAppServerAdapter(config=fallback, store=FileStore(tmpdir), rpc=FakeRpc())
+
+            async def run() -> None:
+                self.assertEqual(
+                    await explicit_adapter.list_models(workspace=Workspace(path="D:/repo")),
+                    ("test-model", "test-model-next"),
+                )
+                self.assertEqual(
+                    await fallback_adapter.list_models(workspace=Workspace(path="D:/repo")),
+                    ("test-model",),
+                )
+
+            asyncio.run(run())
+
+    def test_codex_skills_come_from_app_server_skills_api(self) -> None:
+        async def run() -> None:
+            with TemporaryDirectory() as tmpdir:
+                rpc = FakeRpc()
+                rpc.skills = {
+                    "skills": [
+                        {"name": "c-tdd", "description": "Test-driven development"},
+                        {"name": "c-review"},
+                    ]
+                }
+                adapter = CodexAppServerAdapter(config=_config(), store=FileStore(tmpdir), rpc=rpc)
+
+                self.assertEqual(
+                    await adapter.list_skills(workspace=Workspace(path="D:/repo")),
+                    (
+                        SkillInfo(name="c-tdd", description="Test-driven development"),
+                        SkillInfo(name="c-review", description=None),
+                    ),
+                )
+                self.assertEqual(rpc.calls, [("skill/list", {"cwd": "D:/repo"})])
+
+        asyncio.run(run())
+
 
 class FakeRpc:
     def __init__(self, thread_id: str = "thread"):
         self.calls = []
         self.thread_id = thread_id
+        self.skills = {"skills": []}
 
     async def request(self, method, params):
         self.calls.append((method, params))
         if method == "thread/start":
             return {"thread": {"id": self.thread_id}}
+        if method == "skill/list":
+            return self.skills
         return {"turn": {"id": "turn"}}
 
     async def respond(self, request_id, result):
@@ -123,7 +196,17 @@ def _request(request_id, method, **params):
 
 
 def _config() -> CodexConfig:
-    return CodexConfig(None, None, "C:/Users/Maple/.codex", "D:/repo", "D:/repo/.claude/skills/c-auto/SKILL.md", "test-model", "workspace-write", "on-request")
+    return CodexConfig(
+        None,
+        None,
+        "C:/Users/Maple/.codex",
+        "D:/repo",
+        "D:/repo/.claude/skills/c-auto/SKILL.md",
+        "test-model",
+        ("test-model",),
+        "workspace-write",
+        "on-request",
+    )
 
 
 def _session():

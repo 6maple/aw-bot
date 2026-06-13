@@ -233,7 +233,14 @@ class FakeAgentPort:
             access_mode=access_mode,
         )
 
-    async def start_turn(self, *, agent_session: AgentSession, prompt: str) -> FakeAgentTurnStream:
+    async def start_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
+    ) -> FakeAgentTurnStream:
         self.started_prompts.append(prompt)
         return FakeAgentTurnStream(
             agent_turn=AgentTurn(agent_turn_id="turn_1"),
@@ -281,7 +288,14 @@ class FakeStaleSessionAgentPort:
             access_mode=access_mode,
         )
 
-    async def start_turn(self, *, agent_session: AgentSession, prompt: str) -> FakeAgentTurnStream:
+    async def start_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
+    ) -> FakeAgentTurnStream:
         self.started_session_ids.append(agent_session.agent_session_id)
         if agent_session.agent_session_id == "stale_session":
             raise AgentThreadNotFound("Session not found: stale_session")

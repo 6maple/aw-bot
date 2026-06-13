@@ -251,7 +251,14 @@ class FakePendingAgentPort:
             access_mode=access_mode,
         )
 
-    async def start_turn(self, *, agent_session: AgentSession, prompt: str) -> "FakePendingTurn":
+    async def start_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
+    ) -> "FakePendingTurn":
         self.started_prompts.append(prompt)
         return FakePendingTurn(self, agent_turn=AgentTurn(agent_turn_id="turn_1"))
 

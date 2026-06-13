@@ -19,6 +19,12 @@ class IncomingMessage:
     attachments: tuple[IncomingAttachment, ...] = ()
 
 
+@dataclass(frozen=True)
+class IncomingMenuEvent:
+    user_id: str
+    event_key: str
+
+
 def parse_text_content(content: str) -> str:
     payload = json.loads(content)
     text = payload["text"]

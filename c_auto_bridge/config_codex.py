@@ -10,6 +10,7 @@ class CodexConfig:
     workspace: str
     c_auto_skill_path: str | None
     model: str
+    models: tuple[str, ...]
     sandbox: str
     approval_policy: str
 
@@ -31,6 +32,7 @@ def load_codex_config() -> CodexConfig:
         workspace=os.environ["CODEX_WORKSPACE"],
         c_auto_skill_path=os.environ.get("CODEX_C_AUTO_SKILL_PATH"),
         model=os.environ["CODEX_MODEL"],
+        models=_codex_models(os.environ.get("CODEX_MODELS"), os.environ["CODEX_MODEL"]),
         sandbox=os.environ["CODEX_SANDBOX"],
         approval_policy=os.environ["CODEX_APPROVAL_POLICY"],
     )
@@ -38,3 +40,12 @@ def load_codex_config() -> CodexConfig:
 
 def missing_codex_env_vars() -> list[str]:
     return [name for name in REQUIRED_ENV_VARS if not os.environ.get(name)]
+
+
+def _codex_models(value: str | None, configured_model: str) -> tuple[str, ...]:
+    if value is None:
+        return (configured_model,)
+    models = tuple(model.strip() for model in value.split(",") if model.strip() != "")
+    if len(models) == 0:
+        raise ValueError("CODEX_MODELS must include at least one model")
+    return models

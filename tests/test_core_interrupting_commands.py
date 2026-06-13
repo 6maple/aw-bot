@@ -257,7 +257,14 @@ class FakeInterruptingAgentPort:
         self._current_session = session
         return session
 
-    async def start_turn(self, *, agent_session: AgentSession, prompt: str) -> "FakeInterruptingTurn":
+    async def start_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
+    ) -> "FakeInterruptingTurn":
         self.started_prompts.append(prompt)
         turn_id = f"turn_{len(self.started_prompts)}"
         if self.pending_mode:

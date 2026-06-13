@@ -11,7 +11,12 @@ from c_auto_bridge.core.agent_session import AgentSession, AgentTurn, Workspace
 from c_auto_bridge.core.run_view import RunView
 from c_auto_bridge.core.use_cases import (
     CoreUseCases,
+    FileFinderResult,
+    OpenCodeAgentSelected,
+    ModelListResult,
     PrivateChatTextMessage,
+    SkillInfo,
+    SkillListResult,
     WorkspaceChanged,
     WorkspaceListResult,
     WorkspaceRemoved,
@@ -21,6 +26,761 @@ from c_auto_bridge.core.workspace import NamedWorkspace, WorkspaceValidator
 
 
 class CoreWorkspaceCommandsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_opencode_agent_plan_selects_agent_for_subsequent_turn(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+                agent_name="opencode",
+            )
+
+            selected = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/agent plan",
+                )
+            )
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/stop",
+                )
+            )
+            await first_run_task
+
+            self.assertEqual(selected, OpenCodeAgentSelected(agent="plan"))
+            self.assertEqual(agent.started_opencode_agents, ["plan"])
+
+    async def test_opencode_agent_build_selects_agent_for_subsequent_turn(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+                agent_name="opencode",
+            )
+
+            selected = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/agent build",
+                )
+            )
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/stop",
+                )
+            )
+            await first_run_task
+
+            self.assertEqual(selected, OpenCodeAgentSelected(agent="build"))
+            self.assertEqual(agent.started_opencode_agents, ["build"])
+
+    async def test_agent_command_rejects_unknown_opencode_agent(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=FakeWorkspacePersistence(),
+                run_view_sink=FakeRunViewSink(),
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+                agent_name="opencode",
+            )
+
+            for command in ("/agent", "/agent   "):
+                with self.assertRaisesRegex(ValueError, "OpenCode agent value is required"):
+                    await use_cases.handle_private_chat_text(
+                        PrivateChatTextMessage("chat_1", "user_1", command)
+                    )
+            with self.assertRaisesRegex(ValueError, "unknown OpenCode agent: review"):
+                await use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage("chat_1", "user_1", "/agent review")
+                )
+
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_codex_runtime_rejects_opencode_agent_switch(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=FakeWorkspacePersistence(),
+                run_view_sink=FakeRunViewSink(),
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            for command in ("/agent plan", "/agent build"):
+                with self.assertRaisesRegex(ValueError, f"{command} is only available for OpenCode"):
+                    await use_cases.handle_private_chat_text(
+                        PrivateChatTextMessage("chat_1", "user_1", command)
+                    )
+
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_opencode_agent_switch_does_not_mutate_active_run_agent(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+                agent_name="opencode",
+            )
+
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage("chat_1", "user_1", "/agent plan")
+            )
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage("chat_1", "user_1", "work")
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage("chat_1", "user_1", "/agent build")
+            )
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage("chat_1", "user_1", "/stop")
+            )
+            await first_run_task
+
+            self.assertEqual(agent.started_opencode_agents, ["plan"])
+
+    async def test_queued_turn_after_opencode_agent_switch_uses_selected_agent(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+                agent_name="opencode",
+            )
+
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage("chat_1", "user_1", "/agent plan")
+            )
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage("chat_1", "user_1", "work")
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage("chat_1", "user_1", "/agent build")
+            )
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage("chat_1", "user_1", "queued")
+            )
+            agent.release_first_turn()
+            await first_run_task
+
+            self.assertEqual(agent.started_opencode_agents, ["plan", "build"])
+            self.assertEqual(agent.created_sessions, ["session_1", "session_2"])
+
+    async def test_skills_lists_active_agent_skills_without_starting_agent_turn(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(
+                skills=(
+                    SkillInfo(name="c-tdd", description="Test-driven development"),
+                    SkillInfo(name="c-review", description=None),
+                )
+            )
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            result = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/skills",
+                )
+            )
+
+            self.assertEqual(
+                result,
+                SkillListResult(
+                    agent_name="codex",
+                    skills=(
+                        SkillInfo(name="c-tdd", description="Test-driven development"),
+                        SkillInfo(name="c-review", description=None),
+                    ),
+                ),
+            )
+            self.assertEqual(agent.skill_workspaces, [str(workspace_dir.resolve())])
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_model_lists_active_agent_models_and_current_scope_selection(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model", "test-model-next"))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            result = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model",
+                )
+            )
+
+            self.assertEqual(
+                result,
+                ModelListResult(
+                    agent_name="codex",
+                    models=("test-model", "test-model-next"),
+                    selected_model=None,
+                ),
+            )
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_model_use_selects_model_for_current_private_chat_scope_only(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model", "test-model-next"))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            selected = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model use test-model-next",
+                )
+            )
+            same_scope = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model",
+                )
+            )
+            other_scope = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_2",
+                    user_id="user_1",
+                    text="/model",
+                )
+            )
+
+            self.assertEqual(
+                selected,
+                ModelListResult(
+                    agent_name="codex",
+                    models=("test-model", "test-model-next"),
+                    selected_model="test-model-next",
+                ),
+            )
+            self.assertEqual(same_scope.selected_model, "test-model-next")
+            self.assertIsNone(other_scope.selected_model)
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_selected_model_is_passed_to_new_agent_turn(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model", "test-model-next"))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model use test-model-next",
+                )
+            )
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/stop",
+                )
+            )
+            await first_run_task
+
+            self.assertEqual(agent.started_models, ["test-model-next"])
+
+    async def test_model_switch_clears_current_session_for_subsequent_turns(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model", "test-model-next"))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/stop",
+                )
+            )
+            await first_run_task
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model use test-model-next",
+                )
+            )
+            next_run = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="fresh",
+                )
+            )
+
+            self.assertEqual(persistence.cleared_session_scope_ids, ["chat_1"])
+            self.assertEqual(agent.created_sessions, ["session_1", "session_2"])
+            self.assertEqual(next_run.agent_session_id, "session_2")
+            self.assertEqual(agent.started_models, [None, "test-model-next"])
+
+    async def test_model_switch_does_not_mutate_active_run_model(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model", "test-model-next"))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model use test-model-next",
+                )
+            )
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/stop",
+                )
+            )
+            await first_run_task
+
+            self.assertEqual(agent.started_models, [None])
+
+    async def test_queued_turn_after_model_switch_uses_selected_model_and_fresh_session(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model", "test-model-next"))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            first_run_task = asyncio.create_task(
+                use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="work",
+                    )
+                )
+            )
+            await agent.wait_for_active_turn()
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model use test-model-next",
+                )
+            )
+            await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="queued",
+                )
+            )
+            agent.release_first_turn()
+            final_run = await first_run_task
+
+            self.assertEqual(final_run.agent_session_id, "session_2")
+            self.assertEqual(agent.created_sessions, ["session_1", "session_2"])
+            self.assertEqual(agent.started_models, [None, "test-model-next"])
+
+    async def test_model_use_requires_known_model_value(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort(models=("test-model",))
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            for command in ("/model use", "/model use   "):
+                with self.assertRaisesRegex(ValueError, "model value is required"):
+                    await use_cases.handle_private_chat_text(
+                        PrivateChatTextMessage(
+                            private_chat_scope_id="chat_1",
+                            user_id="user_1",
+                            text=command,
+                        )
+                    )
+            with self.assertRaisesRegex(ValueError, "unknown model: test-model-missing"):
+                await use_cases.handle_private_chat_text(
+                    PrivateChatTextMessage(
+                        private_chat_scope_id="chat_1",
+                        user_id="user_1",
+                        text="/model use test-model-missing",
+                    )
+                )
+
+            listed = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/model",
+                )
+            )
+            self.assertIsNone(listed.selected_model)
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_files_returns_workspace_relative_matches_without_starting_agent_turn(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            (workspace_dir / "src").mkdir()
+            (workspace_dir / "src" / "app.py").write_text("", encoding="utf-8")
+            (workspace_dir / "notes.txt").write_text("", encoding="utf-8")
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            result = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/files app",
+                )
+            )
+
+            self.assertEqual(result, FileFinderResult(paths=("src/app.py",)))
+            self.assertEqual(agent.started_prompts, [])
+
+    async def test_files_excludes_noisy_directories_and_limits_results(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            (workspace_dir / "src").mkdir()
+            for index in range(11):
+                (workspace_dir / "src" / f"match_{index:02}.txt").write_text("", encoding="utf-8")
+            for directory in (".git", ".venv", "node_modules", ".data", ".cache"):
+                noisy_dir = workspace_dir / directory
+                noisy_dir.mkdir()
+                (noisy_dir / "match_noise.txt").write_text("", encoding="utf-8")
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            result = await use_cases.handle_private_chat_text(
+                PrivateChatTextMessage(
+                    private_chat_scope_id="chat_1",
+                    user_id="user_1",
+                    text="/files match",
+                )
+            )
+
+            self.assertEqual(
+                result,
+                FileFinderResult(
+                    paths=tuple(f"src/match_{index:02}.txt" for index in range(10))
+                ),
+            )
+
+    async def test_files_requires_query(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            home_dir.mkdir()
+            workspace_dir = Path(tmpdir) / "repo"
+            workspace_dir.mkdir()
+            agent = FakeWorkspaceAgentPort()
+            persistence = FakeWorkspacePersistence()
+            run_view_sink = FakeRunViewSink()
+            use_cases = build_use_cases(
+                agent=agent,
+                persistence=persistence,
+                run_view_sink=run_view_sink,
+                workspace=Workspace(path=str(workspace_dir.resolve())),
+                workspace_validator=WorkspaceValidator(
+                    home_directory=home_dir,
+                    temp_directory=Path(tmpdir) / "temp",
+                    system_directories=(),
+                ),
+            )
+
+            for command in ("/files", "/files   "):
+                with self.assertRaisesRegex(ValueError, "file query is required"):
+                    await use_cases.handle_private_chat_text(
+                        PrivateChatTextMessage(
+                            private_chat_scope_id="chat_1",
+                            user_id="user_1",
+                            text=command,
+                        )
+                    )
+
+            self.assertEqual(agent.started_prompts, [])
+
     async def test_cd_switches_workspace_interrupts_run_and_clears_session(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir) / "home"
@@ -256,7 +1016,32 @@ class CoreWorkspaceCommandsTest(unittest.IsolatedAsyncioTestCase):
                 )
 
 
-def build_use_cases(agent, persistence, run_view_sink, workspace: Workspace, workspace_validator: WorkspaceValidator) -> CoreUseCases:
+def build_use_cases(
+    agent,
+    persistence,
+    run_view_sink,
+    workspace: Workspace,
+    workspace_validator: WorkspaceValidator,
+    agent_name: str = "codex",
+) -> CoreUseCases:
+    return build_use_cases_with_agent_name(
+        agent=agent,
+        persistence=persistence,
+        run_view_sink=run_view_sink,
+        workspace=workspace,
+        workspace_validator=workspace_validator,
+        agent_name=agent_name,
+    )
+
+
+def build_use_cases_with_agent_name(
+    agent,
+    persistence,
+    run_view_sink,
+    workspace: Workspace,
+    workspace_validator: WorkspaceValidator,
+    agent_name: str,
+) -> CoreUseCases:
     return CoreUseCases(
         agent=agent,
         persistence=persistence,
@@ -264,7 +1049,7 @@ def build_use_cases(agent, persistence, run_view_sink, workspace: Workspace, wor
         workspace=workspace,
         workspace_validator=workspace_validator,
         access_mode="workspace",
-        agent_name="codex",
+        agent_name=agent_name,
         clock=lambda: datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
         run_id_factory=RunIdFactory(),
     )
@@ -280,15 +1065,32 @@ class RunIdFactory:
 
 
 class FakeWorkspaceAgentPort:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        models: tuple[str, ...] = ("test-model",),
+        skills: tuple[SkillInfo, ...] = (),
+    ) -> None:
+        self.models = models
+        self.skills = skills
+        self.skill_workspaces: list[str] = []
         self.created_sessions: list[str] = []
         self.session_workspaces: list[str] = []
         self.started_prompts: list[str] = []
+        self.started_models: list[str | None] = []
+        self.started_opencode_agents: list[str | None] = []
         self.stopped_turn_ids: list[str] = []
         self._active_turn = asyncio.Event()
         self._stop_first_turn = asyncio.Event()
         self._session_counter = 0
         self._current_session: AgentSession | None = None
+
+    async def list_models(self, *, workspace: Workspace) -> tuple[str, ...]:
+        return self.models
+
+    async def list_skills(self, *, workspace: Workspace) -> tuple[SkillInfo, ...]:
+        self.skill_workspaces.append(workspace.path)
+        return self.skills
 
     async def get_or_create_session(
         self,
@@ -332,8 +1134,17 @@ class FakeWorkspaceAgentPort:
         self._current_session = session
         return session
 
-    async def start_turn(self, *, agent_session: AgentSession, prompt: str) -> "FakeWorkspaceTurn":
+    async def start_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
+    ) -> "FakeWorkspaceTurn":
         self.started_prompts.append(prompt)
+        self.started_models.append(model)
+        self.started_opencode_agents.append(opencode_agent)
         turn_id = f"turn_{len(self.started_prompts)}"
         if len(self.started_prompts) == 1:
             return FakeWorkspaceTurn(
@@ -354,10 +1165,14 @@ class FakeWorkspaceAgentPort:
             await asyncio.sleep(0)
         raise AssertionError("active turn did not start")
 
+    def release_first_turn(self) -> None:
+        self._stop_first_turn.set()
+
     async def _blocking_events(self) -> AsyncIterator[object]:
         self._active_turn.set()
         yield TextDelta("working")
         await self._stop_first_turn.wait()
+        yield RunCompleted()
 
     async def _completed_events(self, prompt: str) -> AsyncIterator[object]:
         yield TextDelta(prompt)

@@ -32,6 +32,9 @@ class OpencodeHttpClient:
     async def list_agents(self, *, workspace: str) -> list[dict[str, Any]]:
         return await self._request("GET", _with_directory("/agent", workspace))
 
+    async def list_skills(self, *, workspace: str) -> list[dict[str, Any]]:
+        return await self._request("GET", _with_directory("/skill", workspace))
+
     async def create_session(self, *, title: str, workspace: str) -> dict[str, Any]:
         return await self._request("POST", _with_directory("/session", workspace), {"title": title})
 

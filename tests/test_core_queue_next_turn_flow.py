@@ -174,7 +174,14 @@ class FakeQueuedAgentPort:
             access_mode=access_mode,
         )
 
-    async def start_turn(self, *, agent_session: AgentSession, prompt: str) -> "FakeQueuedTurn":
+    async def start_turn(
+        self,
+        *,
+        agent_session: AgentSession,
+        prompt: str,
+        model: str | None,
+        opencode_agent: str | None = None,
+    ) -> "FakeQueuedTurn":
         self.started_prompts.append(prompt)
         if len(self.started_prompts) == 1 and agent_session.private_chat_scope_id == "chat_1":
             return FakeQueuedTurn(
